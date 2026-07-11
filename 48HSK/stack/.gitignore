@@ -1,0 +1,3 @@
+# Contextos de build (snapshots de APIM/IS/48HSK) — pueden ser varios GB
+.build/
+*.tar

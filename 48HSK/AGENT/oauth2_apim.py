@@ -1,0 +1,191 @@
+"""OAuth2 Client Credentials helper para WSO2 APIM.
+
+Crea un cliente OpenAI (AsyncOpenAI) apuntando al Gateway APIM.
+Pensado para entornos locales con certificados self-signed (https://localhost).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
+
+import httpx
+import requests
+import urllib3
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+from request_identity import get_caller_identity
+from trace_log import trace
+
+urllib3.disable_warnings()
+
+
+@dataclass
+class _TokenCache:
+    token: Optional[str] = None
+    expires_at: float = 0.0
+
+
+_TOKEN_CACHE = _TokenCache()
+
+
+def _load_cached_end_user_token() -> Optional[str]:
+    token_file = Path(__file__).with_name("token_cache.json")
+    try:
+        data = json.loads(token_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    access_token = data.get("access_token")
+    expires_at = data.get("expires_at") or 0
+    if not access_token or time.time() >= (float(expires_at) - 30):
+        return None
+    return str(access_token)
+
+
+def get_gateway_access_token() -> Optional[str]:
+    caller_identity = get_caller_identity()
+    if caller_identity and caller_identity.access_token:
+        return caller_identity.access_token
+
+    cached_end_user_token = _load_cached_end_user_token()
+    if cached_end_user_token:
+        return cached_end_user_token
+
+    return None
+
+
+def _is_localhost_url(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        host = None
+    return host in {"localhost", "127.0.0.1"}
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _load_env_if_present() -> None:
+    env_file = Path(__file__).with_name(".env")
+    if env_file.exists():
+        load_dotenv(dotenv_path=env_file)
+    else:
+        load_dotenv()
+
+
+def _fetch_oauth2_token_sync() -> tuple[str, int]:
+    """Devuelve (access_token, expires_in_seconds)."""
+    _load_env_if_present()
+
+    consumer_key = os.getenv("WSO2_APIM_CONSUMER_KEY") or os.getenv("WSO2_CONSUMER_KEY")
+    consumer_secret = os.getenv("WSO2_APIM_CONSUMER_SECRET") or os.getenv("WSO2_CONSUMER_SECRET")
+    token_endpoint = (
+        os.getenv("WSO2_APIM_TOKEN_ENDPOINT")
+        or os.getenv("WSO2_TOKEN_ENDPOINT")
+        or "https://localhost:9453/oauth2/token"
+    )
+
+    if not consumer_key or not consumer_secret:
+        raise RuntimeError(
+            "Falta WSO2_APIM_CONSUMER_KEY/WSO2_APIM_CONSUMER_SECRET (o WSO2_CONSUMER_KEY/WSO2_CONSUMER_SECRET) en .env"
+        )
+
+    verify_ssl_default = not _is_localhost_url(token_endpoint)
+    verify_ssl = _get_bool_env("WSO2_TOKEN_VERIFY_SSL", verify_ssl_default)
+
+    creds = f"{consumer_key}:{consumer_secret}"
+    basic_auth = base64.b64encode(creds.encode()).decode()
+
+    trace("APIM", "Solicitando token de aplicación (OAuth2 client_credentials)", token_endpoint)
+    response = requests.post(
+        token_endpoint,
+        headers={
+            "Authorization": f"Basic {basic_auth}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data="grant_type=client_credentials",
+        verify=verify_ssl,
+        timeout=15,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Error OAuth2: {response.status_code} - {response.text}")
+
+    token_data = response.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise RuntimeError("No se recibió access_token")
+
+    expires_in = int(token_data.get("expires_in") or 3600)
+    trace("APIM", "Token de aplicación emitido", f"scope={token_data.get('scope','-')} · expira en {expires_in}s", status=response.status_code)
+    return access_token, expires_in
+
+
+async def _get_oauth2_token_cached() -> str:
+    # La ruta del LLM SIEMPRE usa client-credentials contra APIM (9443).
+    # No usamos el token de usuario final (emitido por IS en 9453) porque el
+    # gateway de APIM no lo reconoce y devuelve 900901 "Invalid Credentials".
+    # El token de usuario/OBO se sigue usando en otras rutas (p.ej. permisos
+    # Shopify vía SCIM), pero nunca como credencial del gateway OpenAI.
+
+    # Reusar token si todavía es válido (con margen)
+    now = time.time()
+    if _TOKEN_CACHE.token and now < (_TOKEN_CACHE.expires_at - 30):
+        return _TOKEN_CACHE.token
+
+    token, expires_in = await asyncio.to_thread(_fetch_oauth2_token_sync)
+    _TOKEN_CACHE.token = token
+    _TOKEN_CACHE.expires_at = time.time() + max(0, expires_in)
+    return token
+
+
+def create_openai_client_with_gateway() -> Optional[AsyncOpenAI]:
+    """Crea un cliente OpenAI AsyncOpenAI apuntando al Gateway APIM."""
+    _load_env_if_present()
+
+    gateway_base_url = (
+        os.getenv("WSO2_OPENAI_API_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "https://localhost:8253/openaiapi/2.3.0"
+    )
+
+    # Quitar /chat/completions si existe para obtener base_url
+    gateway_base_url = gateway_base_url.rsplit("/chat/completions", 1)[0]
+
+    verify_ssl_default = not _is_localhost_url(gateway_base_url)
+    verify_ssl = _get_bool_env("WSO2_GATEWAY_VERIFY_SSL", verify_ssl_default)
+
+    async def _trace_llm_request(request):
+        trace("APIM", f"LLM · {request.method} {request.url.path}", "OpenAI a través del Gateway (token de app)")
+
+    async def _trace_llm_response(response):
+        trace("APIM", "LLM · respuesta del Gateway", str(response.url.path), status=response.status_code)
+
+    try:
+        http_client = httpx.AsyncClient(
+            verify=verify_ssl,
+            timeout=httpx.Timeout(30.0),
+            event_hooks={"request": [_trace_llm_request], "response": [_trace_llm_response]},
+        )
+        client = AsyncOpenAI(
+            base_url=gateway_base_url,
+            api_key=_get_oauth2_token_cached,
+            http_client=http_client,
+        )
+        return client
+    except Exception as e:
+        print(f"Error creando cliente Gateway: {e}")
+        return None

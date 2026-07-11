@@ -1,0 +1,9 @@
+48HSK_backup_*/
+48HSK_backup_*.tar.gz
+MassiveAttackDemo/massiveattack_env/
+MassiveAttackDemo_Backup/massiveattack_env/
+
+# Servidores WSO2 nativos (pesados, con secretos en H2, regenerables) — NO commitear
+/apim/
+/IS/
+.DS_Store

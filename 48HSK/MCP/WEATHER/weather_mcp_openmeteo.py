@@ -1,0 +1,977 @@
+#!/usr/bin/env python3
+"""
+Weather MCP Server for Spanish Fashion Retail (Open-Meteo Version)
+
+This MCP server provides weather forecasting capabilities for Spanish cities,
+designed to help e-commerce agents make data-driven decisions about inventory,
+pricing, and marketing strategies based on weather conditions.
+
+Uses Open-Meteo API (no API key required, unlimited calls, better for Spain)
+
+Author: Demo for Fashion Retail Agent
+"""
+
+import json
+import logging
+import os
+import re
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from enum import Enum
+
+import httpx
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field, ConfigDict
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# El transporte stdio del MCP es sensible a ruido en salida; además, el Inspector
+# marca cualquier salida en stderr como "Error output" aunque sea INFO.
+# Forzamos un nivel más alto para evitar logs informativos del framework.
+_LOG_LEVEL = os.getenv("WEATHER_MCP_LOG_LEVEL", "INFO").upper()  # Cambio temporal a INFO para debugging
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    force=True,
+)
+logging.getLogger("mcp").setLevel(getattr(logging, _LOG_LEVEL, logging.INFO))
+logger = logging.getLogger(__name__)
+
+
+# Initialize FastMCP server
+# APIM 4.6 necesita validar la URL antes de conectar
+mcp = FastMCP(
+    "weather_mcp",
+    host="0.0.0.0",
+    port=8080,
+    streamable_http_path="/mcp",
+    json_response=True
+)
+
+# Get the underlying Starlette app - streamable_http_app() returns a Starlette app
+# with MCP endpoints already configured
+original_app = mcp.streamable_http_app()
+
+# Primero agregamos middleware CORS y logging a la app original
+# Update CORS middleware to include specific APIM domain
+# Based on FastAPI docs: when using credentials, cannot use "*" wildcard
+original_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Keep wildcard for now, but ensure credentials are handled
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly allow OPTIONS for preflight
+    allow_headers=["*"],
+)
+
+# Add logging middleware to debug incoming requests
+class LogRequestsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        logger.info(f"Incoming request: {request.method} {request.url}")
+        logger.info(f"Headers: {dict(request.headers)}")
+        response = await call_next(request)
+        logger.info(f"Response status: {response.status_code}")
+        return response
+
+original_app.add_middleware(LogRequestsMiddleware)
+
+# Add health check endpoint to the app
+async def health_check(request):
+    """Health check endpoint for WSO2."""
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok", "service": "weather_mcp"})
+
+original_app.add_route("/health", health_check, methods=["GET"])
+
+# Bearer Token para WSO2 MCP Playground
+MCP_BEARER_TOKEN = "weather-mcp-2026"
+
+# Bearer Token middleware - placed AFTER CORS to allow preflight requests
+class BearerTokenMiddleware(BaseHTTPMiddleware):
+    """Middleware Bearer Token para WSO2"""
+    async def dispatch(self, request, call_next):
+        # Skip token verification for OPTIONS requests (CORS preflight)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # Skip token verification for health endpoint
+        if request.url.path == "/health":
+            return await call_next(request)
+
+        auth = request.headers.get("authorization")
+
+        # APIM valida la autenticación por delante (OAuth2). Aceptamos cualquier
+        # Bearer y también peticiones sin cabecera (introspección/enrutado de APIM
+        # al crear el MCP server y en el proxy), ya que el gateway es el guardián.
+        if not auth or auth.startswith("Bearer "):
+            return await call_next(request)
+
+        return JSONResponse(
+            {"error": "Bearer token required"},
+            status_code=401
+        )
+
+original_app.add_middleware(BearerTokenMiddleware)
+
+# ASGI Middleware Wrapper para inyectar Accept header ANTES de que FastMCP lo valide
+# Esto intercepta a nivel ASGI antes de que Starlette procese el request
+class ASGIAcceptHeaderWrapper:
+    """
+    ASGI middleware que inyecta el Accept header correcto.
+    Se ejecuta ANTES de cualquier middleware de Starlette o validación de FastMCP.
+    """
+    def __init__(self, app):
+        self.app = app
+    
+    async def __call__(self, scope, receive, send):
+        logger.info(f"ASGI Wrapper ejecutándose: type={scope.get('type')}, path={scope.get('path')}")
+        
+        if scope["type"] == "http" and scope["path"] == "/mcp":
+            # Obtener headers actuales
+            headers = dict(scope.get("headers", []))
+            accept_header = headers.get(b"accept", b"").decode("latin1")
+            
+            logger.info(f"Accept header original: '{accept_header}'")
+            
+            # Si no tiene ambos tipos requeridos, inyectar el correcto
+            if "application/json" not in accept_header or "text/event-stream" not in accept_header:
+                logger.warning(f"ASGI Wrapper: Accept header incorrecto: '{accept_header}' - Inyectando el correcto")
+                
+                # Modificar headers en scope ANTES de pasar a la app
+                new_headers = []
+                for name, value in scope.get("headers", []):
+                    if name.lower() != b"accept":
+                        new_headers.append((name, value))
+                
+                # Agregar el Accept header correcto
+                new_headers.append((b"accept", b"application/json, text/event-stream"))
+                scope["headers"] = new_headers
+                
+                logger.info("Accept header inyectado correctamente")
+        
+        # Pasar el scope modificado a la aplicación original
+        await self.app(scope, receive, send)
+
+# Envolver la app de FastMCP con nuestro wrapper ASGI
+app_instance = ASGIAcceptHeaderWrapper(original_app)
+
+# Export for uvicorn
+asgi_app = app_instance
+
+# Verificar que el wrapper está en su lugar (usar logger, NO print,
+# porque print→stdout rompe el transporte STDIO del MCP Inspector)
+logger.info(f"ASGI app configurada: {type(asgi_app).__name__}")
+logger.info(f"Wrapper activo: {isinstance(asgi_app, ASGIAcceptHeaderWrapper)}")
+
+# Open-Meteo API Configuration
+BASE_URL = "https://api.open-meteo.com/v1/forecast"
+
+# Spanish cities with coordinates
+SPANISH_CITIES = {
+    "Madrid": {"lat": 40.4168, "lon": -3.7038},
+    "Barcelona": {"lat": 41.3874, "lon": 2.1686},
+    "Valencia": {"lat": 39.4699, "lon": -0.3763},
+    "Sevilla": {"lat": 37.3891, "lon": -5.9845},
+    "Zaragoza": {"lat": 41.6488, "lon": -0.8891},
+    "Málaga": {"lat": 36.7213, "lon": -4.4213},
+    "Murcia": {"lat": 37.9922, "lon": -1.1307},
+    "Bilbao": {"lat": 43.2627, "lon": -2.9253},
+    "Vitoria": {"lat": 42.8467, "lon": -2.6716},
+    "Alicante": {"lat": 38.3452, "lon": -0.4810},
+    "Córdoba": {"lat": 37.8882, "lon": -4.7794},
+    "Burgos": {"lat": 42.3439, "lon": -3.6969},
+    "La Coruña": {"lat": 43.3623, "lon": -8.4115},
+    "Santa Cruz de Tenerife": {"lat": 28.4636, "lon": -16.2518},
+    "Buenaventura": {"lat": 3.8770, "lon": -77.0270},
+    "Alaska": {"lat": 61.2181, "lon": -149.9003},  # Anchorage (ciudad principal de Alaska)
+}
+
+# WMO Weather interpretation codes
+# https://open-meteo.com/en/docsAge
+WMO_CODES = {
+    0: "Clear",
+    1: "Mainly Clear",
+    2: "Partly Cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing Rime Fog",
+    51: "Light Drizzle",
+    53: "Moderate Drizzle",
+    55: "Dense Drizzle",
+    56: "Light Freezing Drizzle",
+    57: "Dense Freezing Drizzle",
+    61: "Slight Rain",
+    63: "Moderate Rain",
+    65: "Heavy Rain",
+    66: "Light Freezing Rain",
+    67: "Heavy Freezing Rain",
+    71: "Slight Snow",
+    73: "Moderate Snow",
+    75: "Heavy Snow",
+    77: "Snow Grains",
+    80: "Slight Rain Showers",
+    81: "Moderate Rain Showers",
+    82: "Violent Rain Showers",
+    85: "Slight Snow Showers",
+    86: "Heavy Snow Showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with Slight Hail",
+    99: "Thunderstorm with Heavy Hail",
+}
+
+
+class ResponseFormat(str, Enum):
+    """Output format options for weather data."""
+    MARKDOWN = "markdown"
+    JSON = "json"
+
+
+class SpanishCity(str, Enum):
+    """Major Spanish cities for weather forecasting."""
+    MADRID = "Madrid"
+    BARCELONA = "Barcelona"
+    VALENCIA = "Valencia"
+    SEVILLA = "Sevilla"
+    ZARAGOZA = "Zaragoza"
+    MALAGA = "Málaga"
+    MURCIA = "Murcia"
+    BILBAO = "Bilbao"
+    VITORIA = "Vitoria"
+    ALICANTE = "Alicante"
+    CORDOBA = "Córdoba"
+    BURGOS = "Burgos"
+    LA_CORUNA = "La Coruña"
+    SANTA_CRUZ_TENERIFE = "Santa Cruz de Tenerife"
+    BUENAVENTURA = "Buenaventura"
+    ALASKA = "Alaska"
+
+
+# ============================================================================
+# Input Models
+# ============================================================================
+
+class GetCurrentWeatherInput(BaseModel):
+    """Input parameters for getting current weather."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    city: SpanishCity = Field(
+        ...,
+        description="Spanish city to get weather for (e.g., 'Barcelona', 'Madrid')"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+    )
+
+
+class GetForecastInput(BaseModel):
+    """Input parameters for getting weather forecast."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    city: SpanishCity = Field(
+        ...,
+        description="Spanish city to get forecast for (e.g., 'Barcelona', 'Madrid')"
+    )
+    days: int = Field(
+        default=5,
+        description="Number of days to forecast (1-7)",
+        ge=1,
+        le=7
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="Output format: 'markdown' for human-readable or 'json' for machine-readable"
+    )
+
+
+class GetRetailInsightsInput(BaseModel):
+    """Input parameters for getting retail-focused weather insights."""
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra='forbid'
+    )
+    
+    city: SpanishCity = Field(
+        ...,
+        description="Spanish city to analyze (e.g., 'Barcelona', 'Madrid')"
+    )
+    days: int = Field(
+        default=3,
+        description="Number of days to analyze (1-7)",
+        ge=1,
+        le=7
+    )
+    products: Optional[List[str]] = Field(
+        default=None,
+        description="Optional list of ecommerce product names to tailor insights"
+    )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _handle_api_error(e: Exception) -> str:
+    """Consistent error formatting for all weather API calls."""
+    if isinstance(e, httpx.HTTPStatusError):
+        if e.response.status_code == 400:
+            return "Error: Invalid request parameters. Please check city coordinates."
+        elif e.response.status_code == 429:
+            return "Error: Too many requests. Please wait a moment."
+        return f"Error: Weather API request failed with status {e.response.status_code}"
+    elif isinstance(e, httpx.TimeoutException):
+        return "Error: Request timed out. Please try again."
+    elif isinstance(e, KeyError):
+        return f"Error: City not found in database: {str(e)}"
+    return f"Error: Unexpected error occurred: {type(e).__name__}: {str(e)}"
+
+
+def _get_weather_emoji(wmo_code: int) -> str:
+    """Get weather marker (no emojis)."""
+    return ""
+
+
+def _wmo_to_condition(wmo_code: int) -> str:
+    """Convert WMO code to weather condition string."""
+    return WMO_CODES.get(wmo_code, "Unknown")
+
+
+def _is_rainy_condition(wmo_code: int) -> bool:
+    """Check if WMO code represents rainy conditions."""
+    # Drizzle, rain, freezing rain, rain showers
+    return (51 <= wmo_code <= 67) or (80 <= wmo_code <= 82) or (wmo_code >= 95)
+
+
+# Minimum daily precipitation (mm) to consider it meaningfully rainy
+PRECIPITATION_THRESHOLD_MM = 0.5
+
+
+def _has_meaningful_precipitation(precipitation: float, wmo_code: int) -> bool:
+    """Determine whether precipitation is significant enough for rain recommendations."""
+    return precipitation >= PRECIPITATION_THRESHOLD_MM or _is_rainy_condition(wmo_code)
+
+
+def _analyze_retail_impact(temp: float, wmo_code: int, precipitation: float) -> Dict[str, Any]:
+    """
+    Analyze weather data to provide fashion retail insights.
+    
+    Returns recommendations for:
+    - Products to promote
+    - Pricing suggestions
+    - Marketing opportunities
+    - Inventory redistribution
+    - Logistics optimization
+    """
+    
+    recommendations = {
+        "temperature_range": "cold" if temp < 15 else "moderate" if temp < 25 else "hot",
+        "precipitation": _has_meaningful_precipitation(precipitation, wmo_code),
+        "suggested_products": [],
+        "pricing_opportunities": [],
+        "marketing_angles": [],
+        "inventory_actions": [],
+        "logistics_optimization": []
+    }
+    
+    # Temperature-based recommendations
+    if temp < 10:
+        recommendations["suggested_products"].extend([
+            "Abrigos de invierno",
+            "Bufandas y guantes",
+            "Jerseys gruesos"
+        ])
+        recommendations["pricing_opportunities"].append(
+            "Subir precios de ropa de abrigo (+10-15%)"
+        )
+        recommendations["inventory_actions"].extend([
+            "Aumentar stock de ropa de invierno en almacén local",
+            "Reducir exposición de ropa de verano en tienda"
+        ])
+        recommendations["logistics_optimization"].extend([
+            "Redirigir abrigos desde regiones cálidas a esta ubicación",
+            "Preparar envíos prioritarios de productos térmicos"
+        ])
+    elif temp < 20:
+        recommendations["suggested_products"].extend([
+            "Chaquetas ligeras",
+            "Jerseys finos",
+            "Pantalones largos"
+        ])
+        recommendations["inventory_actions"].append(
+            "Mantener stock equilibrado de entretiempo"
+        )
+    else:
+        recommendations["suggested_products"].extend([
+            "Camisetas de manga corta",
+            "Pantalones cortos",
+            "Vestidos ligeros",
+            "Sandalias"
+        ])
+        recommendations["pricing_opportunities"].append(
+            "Promocionar ropa de verano"
+        )
+        recommendations["inventory_actions"].extend([
+            "Devolver abrigos a almacén central (baja demanda)",
+            "Aumentar stock de ropa ligera en tienda física"
+        ])
+        recommendations["logistics_optimization"].extend([
+            "Redirigir ropa de verano desde regiones frías",
+            "Enviar stock sobrante de abrigos a zonas más frías"
+        ])
+    
+    # Precipitation-based recommendations
+    if _has_meaningful_precipitation(precipitation, wmo_code):
+        recommendations["suggested_products"].extend([
+            "Impermeables y chubasqueros",
+            "Botas de agua",
+            "Paraguas"
+        ])
+        recommendations["pricing_opportunities"].extend([
+            "Subir precios de impermeables (+15-20%)",
+            "Destacar botas de agua en homepage"
+        ])
+        recommendations["marketing_angles"].append(
+            "Campaña 'Protegido de la lluvia' con productos impermeables"
+        )
+        recommendations["inventory_actions"].extend([
+            "Aumentar stock de productos impermeables urgentemente",
+            "Preparar paraguas para venta rápida en puntos de venta"
+        ])
+        recommendations["logistics_optimization"].append(
+            "Envío express de impermeables desde almacén central si stock local bajo"
+        )
+    
+    # Clear/sun conditions
+    condition_name = _wmo_to_condition(wmo_code)
+    if "Clear" in condition_name and temp > 20:
+        recommendations["marketing_angles"].append(
+            "Promoción 'Días de sol' con gafas de sol y ropa ligera"
+        )
+    
+    return recommendations
+
+
+_CATEGORY_KEYWORDS = {
+    "Abrigos de invierno": ["abrigo", "parka", "chaqueta", "cazadora", "anorak"],
+    "Bufandas y guantes": ["bufanda", "guante", "gorro"],
+    "Jerseys gruesos": ["jersey", "sueter", "sudadera", "sweater"],
+    "Chaquetas ligeras": ["chaqueta", "cazadora", "americana"],
+    "Jerseys finos": ["jersey", "sueter", "cardigan"],
+    "Pantalones largos": ["pantalon", "vaquero", "jean", "chino"],
+    "Camisetas de manga corta": ["camiseta", "t-shirt", "polo"],
+    "Pantalones cortos": ["short", "bermuda"],
+    "Vestidos ligeros": ["vestido"],
+    "Sandalias": ["sandalia", "chancla"],
+    "Impermeables y chubasqueros": ["impermeable", "chubasquero", "raincoat"],
+    "Botas de agua": ["bota", "botas", "bota de agua", "botas de agua", "rain boot", "rain boots"],
+    "Paraguas": ["paraguas", "umbrella"]
+}
+
+
+def _normalize_for_match(text: str) -> str:
+    return re.sub(r"[^a-z0-9áéíóúñü]+", " ", text.lower()).strip()
+
+
+def _extract_keywords_from_label(label: str) -> List[str]:
+    cleaned = _normalize_for_match(label)
+    parts = [p for p in cleaned.split() if p not in {"de", "y", "la", "el", "los", "las"}]
+    return parts
+
+
+def _match_products_to_suggestions(products: Optional[List[str]], suggested_labels: List[str]) -> List[str]:
+    if not products:
+        return []
+
+    normalized_products = []
+    for name in products:
+        if isinstance(name, str) and name.strip():
+            normalized_products.append((name.strip(), _normalize_for_match(name)))
+
+    matched = []
+    seen = set()
+    for label in suggested_labels:
+        keywords = _CATEGORY_KEYWORDS.get(label, _extract_keywords_from_label(label))
+        if not keywords:
+            continue
+        for original, norm in normalized_products:
+            if any(k in norm for k in keywords):
+                if original not in seen:
+                    matched.append(original)
+                    seen.add(original)
+    return matched
+
+
+def _matched_categories_for_suggestions(products: Optional[List[str]], suggested_labels: List[str]) -> List[str]:
+    if not products:
+        return []
+
+    normalized_products = []
+    for name in products:
+        if isinstance(name, str) and name.strip():
+            normalized_products.append(_normalize_for_match(name))
+
+    matched_labels = []
+    for label in suggested_labels:
+        keywords = _CATEGORY_KEYWORDS.get(label, _extract_keywords_from_label(label))
+        if not keywords:
+            continue
+        if any(k in norm for norm in normalized_products for k in keywords):
+            matched_labels.append(label)
+
+    return matched_labels
+
+
+def _filter_actions_by_catalog(actions: List[str], active_labels: List[str]) -> List[str]:
+    if not actions:
+        return []
+
+    active_set = set(active_labels)
+    if not active_set:
+        # No catálogo compatible con las categorías sugeridas; dejar solo acciones generales
+        filtered = []
+        for action in actions:
+            action_norm = _normalize_for_match(action)
+            mentions_category = False
+            for keywords in _CATEGORY_KEYWORDS.values():
+                if any(k in action_norm for k in keywords):
+                    mentions_category = True
+                    break
+            if not mentions_category:
+                filtered.append(action)
+        return filtered
+
+    filtered = []
+    for action in actions:
+        action_norm = _normalize_for_match(action)
+        mentioned_labels = set()
+        for label, keywords in _CATEGORY_KEYWORDS.items():
+            if any(k in action_norm for k in keywords):
+                mentioned_labels.add(label)
+
+        if not mentioned_labels or mentioned_labels.intersection(active_set):
+            filtered.append(action)
+
+    return filtered
+
+
+def _format_current_weather_markdown(city: str, data: Dict[str, Any]) -> str:
+    """Format current weather data as markdown."""
+    current = data.get("current", {})
+    temp = current.get("temperature_2m", 0)
+    feels_like = current.get("apparent_temperature", temp)
+    humidity = current.get("relative_humidity_2m", 0)
+    wind = current.get("wind_speed_10m", 0)
+    precipitation = current.get("precipitation", 0)
+    wmo_code = current.get("weather_code", 0)
+    
+    condition = _wmo_to_condition(wmo_code)
+    output = f"""# Tiempo Actual en {city}
+
+## Condiciones
+- **Estado**: {condition}
+- **Temperatura**: {temp}°C
+- **Sensación térmica**: {feels_like}°C
+- **Humedad**: {humidity}%
+- **Viento**: {wind} km/h
+"""
+    
+    if precipitation > 0:
+        output += f"- **Precipitación**: {precipitation} mm\n"
+    
+    return output
+
+
+def _format_forecast_markdown(city: str, data: Dict[str, Any], days: int) -> str:
+    """Format forecast data as markdown."""
+    daily = data.get("daily", {})
+    dates = daily.get("time", [])[:days]
+    temp_max = daily.get("temperature_2m_max", [])[:days]
+    temp_min = daily.get("temperature_2m_min", [])[:days]
+    precipitation = daily.get("precipitation_sum", [])[:days]
+    wmo_codes = daily.get("weather_code", [])[:days]
+    
+    output = f"# Previsión del Tiempo para {city}\n\n"
+    
+    for i in range(min(days, len(dates))):
+        date = dates[i]
+        t_max = temp_max[i] if i < len(temp_max) else 0
+        t_min = temp_min[i] if i < len(temp_min) else 0
+        precip = precipitation[i] if i < len(precipitation) else 0
+        wmo = wmo_codes[i] if i < len(wmo_codes) else 0
+        
+        condition = _wmo_to_condition(wmo)
+        avg_temp = round((t_max + t_min) / 2, 1)
+        
+        output += f"## {date}\n"
+        output += f"- **Condición predominante**: {condition}\n"
+        output += f"- **Temperatura**: {t_min}°C - {t_max}°C (media: {avg_temp}°C)\n"
+        
+        if precip > 0:
+            output += f"- **Lluvia esperada**: {round(precip, 1)} mm\n"
+        
+        output += "\n"
+    
+    return output
+
+
+# ============================================================================
+# MCP Tools
+# ============================================================================
+
+@mcp.tool(
+    name="get_current_weather",
+    annotations={
+        "title": "Obtener Tiempo Actual",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def get_current_weather(city: str = "Madrid", response_format: str = "markdown") -> str:
+    """
+    Obtiene el tiempo actual para una ciudad española.
+    
+    Esta herramienta consulta la API de Open-Meteo para obtener condiciones
+    meteorológicas en tiempo real, incluyendo temperatura, humedad, viento y precipitación.
+    
+    Args:
+        params (GetCurrentWeatherInput): Parámetros validados que incluyen:
+            - city (SpanishCity): Ciudad española a consultar
+            - response_format (ResponseFormat): Formato de salida (markdown o json)
+    
+    Returns:
+        str: Datos del tiempo actual en el formato solicitado
+    """
+    try:
+        params = GetCurrentWeatherInput(city=SpanishCity(city), response_format=ResponseFormat(response_format))
+        logger.info(f"get_current_weather called with city={city}")
+        
+        logger.info(f"Ciudad solicitada: {params.city.value}")
+        coords = SPANISH_CITIES[params.city.value]
+        logger.info(f"Coordenadas para {params.city.value}: {coords}")
+        
+        # Verificar que el parámetro city se respeta correctamente
+        logger.info(f"Ciudad recibida: {params.city.value}")
+        logger.info(f"Coordenadas utilizadas: {coords}")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                BASE_URL,
+                params={
+                    "latitude": coords["lat"],
+                    "longitude": coords["lon"],
+                    "current": "temperature_2m,apparent_temperature,precipitation,weather_code,relative_humidity_2m,wind_speed_10m",
+                    "timezone": "Europe/Madrid"
+                },
+                timeout=10.0
+            )
+            response.raise_for_status()
+            data = response.json()
+        
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(data, indent=2, ensure_ascii=False)
+        else:
+            return _format_current_weather_markdown(params.city.value, data)
+    
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="get_weather_forecast",
+    annotations={
+        "title": "Obtener Previsión del Tiempo",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def get_weather_forecast(city: str = "Madrid", days: int = 5, response_format: str = "markdown") -> str:
+    """
+    Obtiene la previsión meteorológica para los próximos días en una ciudad española.
+    
+    Proporciona previsiones detalladas por día, incluyendo temperatura máxima/mínima,
+    condiciones meteorológicas y precipitación acumulada.
+    
+    Args:
+        params (GetForecastInput): Parámetros validados que incluyen:
+            - city (SpanishCity): Ciudad española a consultar
+            - days (int): Número de días a predecir (1-7)
+            - response_format (ResponseFormat): Formato de salida (markdown o json)
+    
+    Returns:
+        str: Previsión del tiempo en el formato solicitado con estructura:
+            - Fecha
+            - Temperatura (min/max/media)
+            - Condiciones meteorológicas
+            - Precipitación esperada
+    """
+    try:
+        params = GetForecastInput(city=SpanishCity(city), days=days, response_format=ResponseFormat(response_format))
+        logger.info(f"get_weather_forecast called with city={city} days={days}")
+        
+        logger.info(f"Ciudad solicitada: {params.city.value}")
+        coords = SPANISH_CITIES[params.city.value]
+        logger.info(f"Coordenadas para {params.city.value}: {coords}")
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                BASE_URL,
+                params={
+                    "latitude": coords["lat"],
+                    "longitude": coords["lon"],
+                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+                    "timezone": "Europe/Madrid",
+                    "forecast_days": params.days
+                },
+                timeout=10.0
+            )
+            response.raise_for_status()
+            data = response.json()
+        
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(data, indent=2, ensure_ascii=False)
+        else:
+            return _format_forecast_markdown(params.city.value, data, params.days)
+    
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+@mcp.tool(
+    name="get_retail_weather_insights",
+    annotations={
+        "title": "Obtener Insights de Retail según el Tiempo",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def get_retail_weather_insights(city: str = "Madrid", days: int = 3, products: Optional[List[str]] = None) -> str:
+    """
+    Analiza el tiempo previsto y proporciona recomendaciones específicas para retail de moda.
+    
+    Esta herramienta combina datos meteorológicos con lógica de negocio para sugerir:
+    - Productos a promocionar
+    - Oportunidades de ajuste de precios
+    - Estrategias de marketing
+    - Gestión de inventario
+    - Optimización logística
+    
+    Ideal para e-commerce de moda que quiere optimizar sus operaciones según el clima.
+    
+    Args:
+        params (GetRetailInsightsInput): Parámetros validados que incluyen:
+            - city (SpanishCity): Ciudad española a analizar
+            - days (int): Número de días a analizar (1-7)
+    
+    Returns:
+        str: Análisis detallado en formato markdown con:
+            - Resumen de condiciones previstas
+            - Productos recomendados para destacar
+            - Oportunidades de pricing dinámico
+            - Sugerencias de gestión de inventario
+            - Recomendaciones de optimización logística
+            - Estrategias de campañas de marketing
+            - Desglose día por día
+    """
+    try:
+        params = GetRetailInsightsInput(city=SpanishCity(city), days=days, products=products)
+        logger.info(f"get_retail_weather_insights called with city={city} days={days}")
+        
+        logger.info(f"Ciudad solicitada: {params.city.value}")
+        coords = SPANISH_CITIES[params.city.value]
+        logger.info(f"Coordenadas para {params.city.value}: {coords}")
+        
+        # Get forecast data
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                BASE_URL,
+                params={
+                    "latitude": coords["lat"],
+                    "longitude": coords["lon"],
+                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+                    "current": "temperature_2m,precipitation,weather_code",
+                    "timezone": "Europe/Madrid",
+                    "forecast_days": params.days
+                },
+                timeout=10.0
+            )
+            response.raise_for_status()
+            forecast_data = response.json()
+        
+        # Analyze each day
+        daily = forecast_data.get("daily", {})
+        dates = daily.get("time", [])[:params.days]
+        temp_max = daily.get("temperature_2m_max", [])[:params.days]
+        temp_min = daily.get("temperature_2m_min", [])[:params.days]
+        precipitation = daily.get("precipitation_sum", [])[:params.days]
+        wmo_codes = daily.get("weather_code", [])[:params.days]
+        
+        daily_insights = []
+        use_catalog = bool(params.products)
+        for i in range(min(params.days, len(dates))):
+            avg_temp = round((temp_max[i] + temp_min[i]) / 2, 1) if i < len(temp_max) and i < len(temp_min) else 15
+            precip = precipitation[i] if i < len(precipitation) else 0
+            wmo = wmo_codes[i] if i < len(wmo_codes) else 0
+            
+            insights = _analyze_retail_impact(avg_temp, wmo, precip)
+            if use_catalog:
+                active_labels = _matched_categories_for_suggestions(params.products, insights["suggested_products"])
+                filtered_suggestions = [label for label in insights["suggested_products"] if label in active_labels]
+                matched_products = _match_products_to_suggestions(params.products, filtered_suggestions)
+                insights = {
+                    **insights,
+                    "suggested_products": filtered_suggestions,
+                    "pricing_opportunities": _filter_actions_by_catalog(insights["pricing_opportunities"], active_labels),
+                    "inventory_actions": _filter_actions_by_catalog(insights["inventory_actions"], active_labels),
+                    "marketing_angles": _filter_actions_by_catalog(insights["marketing_angles"], active_labels),
+                    "logistics_optimization": _filter_actions_by_catalog(insights["logistics_optimization"], active_labels),
+                }
+            else:
+                matched_products = []
+            daily_insights.append({
+                "date": dates[i] if i < len(dates) else "Unknown",
+                "insights": insights,
+                "matched_products": matched_products,
+                "avg_temp": avg_temp,
+                "precipitation_mm": precip,
+                "has_precipitation": _has_meaningful_precipitation(precip, wmo)
+            })
+        
+        # Format output
+        city = params.city.value
+        output = f"# Análisis de Retail para {city}\n\n"
+        output += f"## Resumen Ejecutivo\n\n"
+        if use_catalog:
+            catalog_count = len([p for p in (params.products or []) if isinstance(p, str) and p.strip()])
+            output += f"Catálogo recibido: {catalog_count} productos\n\n"
+        output += f"Horizonte analizado: próximos {params.days} días\n\n"
+        if daily_insights:
+            avg_values = [day["avg_temp"] for day in daily_insights if isinstance(day.get("avg_temp"), (int, float))]
+            if avg_values:
+                temp_min = round(min(avg_values), 1)
+                temp_max = round(max(avg_values), 1)
+                output += f"Temperatura media prevista: {temp_min}°C - {temp_max}°C\n\n"
+        
+        # Aggregate recommendations
+        all_products = set()
+        all_pricing = set()
+        all_marketing = set()
+        all_inventory = set()
+        all_logistics = set()
+        
+        for day in daily_insights:
+            insights = day["insights"]
+            if use_catalog:
+                all_products.update(day["matched_products"])
+            else:
+                all_products.update(insights["suggested_products"])
+            all_pricing.update(insights["pricing_opportunities"])
+            all_marketing.update(insights["marketing_angles"])
+            all_inventory.update(insights["inventory_actions"])
+            all_logistics.update(insights["logistics_optimization"])
+        
+        output += f"### Productos a Destacar\n"
+        if all_products:
+            for product in all_products:
+                output += f"- {product}\n"
+        elif use_catalog:
+            output += "- No se encontraron productos del catálogo para estas condiciones\n"
+        else:
+            output += "- Stock general\n"
+
+        if any(day["has_precipitation"] for day in daily_insights):
+            output += "\nNota: Se esperan episodios de precipitación en el horizonte analizado.\n"
+        
+        output += f"\n### Oportunidades de Pricing\n"
+        if all_pricing:
+            for opportunity in all_pricing:
+                output += f"- {opportunity}\n"
+        else:
+            output += "- Mantener precios actuales (condiciones estables)\n"
+        
+        output += f"\n### Gestión de Inventario\n"
+        if all_inventory:
+            for action in all_inventory:
+                output += f"- {action}\n"
+        else:
+            output += "- Mantener distribución actual de stock\n"
+        
+        output += f"\n### Optimización Logística\n"
+        if all_logistics:
+            for action in all_logistics:
+                output += f"- {action}\n"
+        else:
+            output += "- No se requieren movimientos de stock entre ubicaciones\n"
+        
+        output += f"\n### Estrategias de Marketing\n"
+        if all_marketing:
+            for strategy in all_marketing:
+                output += f"- {strategy}\n"
+        else:
+            output += "- Promoción general según temporada\n"
+        
+        # Daily breakdown
+        output += f"\n## Desglose por Día\n\n"
+        for day in daily_insights:
+            wmo_for_day = wmo_codes[daily_insights.index(day)] if daily_insights.index(day) < len(wmo_codes) else 0
+            precip_note = " (precipitación)" if day["has_precipitation"] else ""
+            
+            output += f"### {day['date']}{precip_note}\n"
+            output += f"- **Temperatura media**: {day['avg_temp']}°C\n"
+            output += f"- **Rango**: {day['insights']['temperature_range']}\n"
+            if day["insights"]["precipitation"]:
+                output += f"- **Precipitación**: Sí ({round(day['precipitation_mm'], 1)} mm)\n"
+            if use_catalog:
+                daily_products = day["matched_products"]
+                if daily_products:
+                    product_list = ", ".join(daily_products[:3])
+                else:
+                    product_list = "Stock general (sin coincidencias en catálogo)"
+            else:
+                product_list = ", ".join(day["insights"]["suggested_products"][:3]) if day["insights"]["suggested_products"] else "Stock general"
+            output += f"\n**Productos clave**: {product_list}\n\n"
+        
+        return output
+    
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+# ============================================================================
+# Server Entry Point
+# ============================================================================
+
+if __name__ == "__main__":
+    import sys
+
+    # Detectar modo de transporte:
+    #   --stdio  → El MCP Inspector (u otro cliente) nos lanza por STDIO
+    #   default  → Servidor HTTP Streamable para WSO2 APIM 4.6
+    if "--stdio" in sys.argv:
+        logger.info("Starting Weather MCP Server in STDIO mode (for Inspector)...")
+        mcp.run(transport="stdio")
+    else:
+        import uvicorn
+        logger.info("Starting Weather MCP Server in HTTP mode...")
+        logger.info("Health check: http://0.0.0.0:8080/health")
+        logger.info("MCP endpoint: http://0.0.0.0:8080/mcp")
+        uvicorn.run(asgi_app, host="0.0.0.0", port=8080)

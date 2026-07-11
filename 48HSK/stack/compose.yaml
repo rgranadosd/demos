@@ -1,0 +1,30 @@
+# Alternativa a up.sh/down.sh con compose (podman compose | docker compose).
+# is y charlas comparten el namespace de red de apim (mismo localhost) → la
+# config actual con localhost:PUERTO funciona sin reescribir nada.
+name: wso2-48hsk
+
+services:
+  apim:
+    image: wso2-apim:48hsk
+    container_name: apim
+    restart: on-failure
+    ports:
+      - "9443:9443"    # APIM mgmt/token/publisher
+      - "8243:8243"    # gateway HTTPS
+      - "8280:8280"    # gateway HTTP
+      - "9453:9453"    # IS (namespace compartido)
+      - "8000:8000"    # callback OAuth del agente
+      - "28080:28080"  # Weather MCP
+      - "8502:8502"    # Streamlit aigateway-demo
+
+  is:
+    image: wso2-is:48hsk
+    container_name: is
+    restart: on-failure
+    network_mode: "service:apim"
+
+  charlas:
+    image: charlas-48hsk:48hsk
+    container_name: charlas
+    restart: on-failure
+    network_mode: "service:apim"
