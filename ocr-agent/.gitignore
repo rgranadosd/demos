@@ -2,5 +2,10 @@ __pycache__/
 *.pyc
 .venv/
 .env
+# Las capturas y fotos sueltas no, pero los dos tickets sinteticos si: son
+# datos de prueba, no llevan nada real, y sin ellos quien clone el repo no
+# tiene con que probar el agente.
 *.png
+!ticket_ok.png
+!ticket_mal.png
 
