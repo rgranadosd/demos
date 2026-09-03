@@ -62,7 +62,36 @@ Todo lo inyecta AMP al desplegar. Estas variables solo se tocan en local:
 | `AMP_LLM_OPENAI_PATH` | Sufijo de path, solo si el upstream es un host pelado |
 | `AMP_LLM_GATEWAY_AUTHORITY` | Fuerza una autoridad concreta |
 
-## cliente.py — probarlo desde fuera
+## La demo: chat visual
+
+```bash
+./servidor.py          # abre http://127.0.0.1:8800
+```
+
+Arrastra la foto de un ticket, pégala del portapapeles o elígela, y sale la
+ficha del gasto: campos, líneas, comprobaciones aritméticas y advertencias.
+
+El servidor hace de intermediario a propósito: **el navegador nunca ve la API
+key**. La petición sale de él sin credencial y el servidor la reenvía al gateway
+con la cabecera `X-API-Key` leída de `.env`. Así se puede proyectar la pantalla,
+abrir las DevTools y no enseñar el secreto.
+
+La cabecera de la interfaz muestra a qué URL se está llamando y si hay
+credencial. En una demo eso importa: se ve que el tráfico entra por el gateway.
+
+### Credenciales
+
+Crea un `.env` junto al código (está en `.gitignore`, nunca va al repo):
+
+```
+OCR_AGENT_URL=http://default-default.am-gateway.localhost:19080/ocr-agent-ocr-agent-endpoint
+OCR_AGENT_API_KEY=la-clave-del-agente
+```
+
+La clave se genera en la consola de Agent Manager, en la sección de API keys del
+agente. Sin ella el gateway responde `401 Valid API key required`.
+
+## cliente.py — la versión de terminal
 
 Cliente sin dependencias (solo librería estándar de Python 3) que llama al
 agente **atravesando el gateway**, como lo haría cualquier consumidor externo.

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agente OCR de gastos</title>
+<style>
+  :root{
+    --fondo:#0d1117; --panel:#161b22; --panel2:#1c2129; --borde:#2a313c;
+    --texto:#e6edf3; --suave:#8b949e; --acento:#ff7a45; --ok:#3fb950;
+    --mal:#f85149; --aviso:#d29922;
+    --fuente:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--fondo);color:var(--texto);font-family:var(--fuente);
+       display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+  header{display:flex;align-items:center;gap:14px;padding:14px 22px;
+         border-bottom:1px solid var(--borde);background:var(--panel)}
+  .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--acento),#ff9f7a);
+        display:grid;place-items:center;font-size:18px;flex:none}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .sub{font-size:11.5px;color:var(--suave);font-family:var(--mono);margin-top:2px;
+              overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52vw}
+  .chip{margin-left:auto;font-size:11px;padding:5px 11px;border-radius:999px;
+        border:1px solid var(--borde);color:var(--suave);white-space:nowrap;font-family:var(--mono)}
+  .chip.on{color:var(--ok);border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.08)}
+  .chip.off{color:var(--mal);border-color:rgba(248,81,73,.35);background:rgba(248,81,73,.08)}
+
+  main{flex:1;overflow-y:auto;padding:26px 22px 8px}
+  .hilo{max-width:820px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+
+  .msg{display:flex;gap:12px;align-items:flex-start;animation:entra .28s ease}
+  @keyframes entra{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .msg.yo{flex-direction:row-reverse}
+  .av{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;
+      font-size:14px;flex:none;background:var(--panel2);border:1px solid var(--borde)}
+  .msg.yo .av{background:#243044}
+  .burbuja{background:var(--panel);border:1px solid var(--borde);border-radius:14px;
+           padding:14px 16px;max-width:88%;font-size:14px;line-height:1.55}
+  .msg.yo .burbuja{background:#1a2332;border-color:#2b3a52}
+  .burbuja img{max-width:260px;border-radius:9px;display:block;border:1px solid var(--borde)}
+  .pie{font-size:11.5px;color:var(--suave);margin-top:8px;font-family:var(--mono)}
+
+  .vacio{text-align:center;color:var(--suave);padding:44px 20px}
+  .vacio .icono{font-size:44px;margin-bottom:14px;opacity:.55}
+  .vacio h2{font-size:17px;color:var(--texto);margin:0 0 8px;font-weight:600}
+  .vacio p{margin:0 auto;max-width:430px;font-size:13.5px;line-height:1.6}
+
+  /* ficha del gasto */
+  .ficha{min-width:340px}
+  .tit{font-size:11px;letter-spacing:.9px;color:var(--suave);text-transform:uppercase;
+       margin:16px 0 8px;font-weight:600}
+  .tit:first-child{margin-top:0}
+  .rejilla{display:grid;grid-template-columns:auto 1fr;gap:5px 16px;font-size:13.5px}
+  .rejilla dt{color:var(--suave)}
+  .rejilla dd{margin:0;font-variant-numeric:tabular-nums}
+  .destacado{font-size:19px;font-weight:650;font-variant-numeric:tabular-nums}
+  .nulo{color:var(--suave);font-style:italic}
+
+  table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+  td{padding:5px 0;border-bottom:1px solid var(--borde)}
+  tr:last-child td{border-bottom:none}
+  td.n{width:38px;color:var(--suave)}
+  td.i{text-align:right;white-space:nowrap}
+
+  .chk{display:flex;align-items:center;gap:9px;font-size:13.5px;padding:3px 0}
+  .chk .m{font-weight:700;width:14px;text-align:center}
+  .chk.ok .m{color:var(--ok)} .chk.mal .m{color:var(--mal)}
+  .calc{font-size:12px;color:var(--suave);font-family:var(--mono);margin-top:6px}
+
+  .aviso{display:flex;gap:9px;align-items:flex-start;font-size:13.5px;padding:9px 12px;
+         background:rgba(210,153,34,.09);border:1px solid rgba(210,153,34,.28);
+         border-radius:9px;margin-top:7px;line-height:1.5}
+  .aviso .m{color:var(--aviso);flex:none;font-weight:700}
+  .sinavisos{color:var(--ok);font-size:13.5px;display:flex;gap:9px;align-items:center}
+  .error{background:rgba(248,81,73,.09);border:1px solid rgba(248,81,73,.3);
+         border-radius:9px;padding:13px 15px}
+  .error b{color:var(--mal)}
+  .error code{display:block;margin-top:9px;font-family:var(--mono);font-size:11.5px;
+              color:var(--suave);white-space:pre-wrap;word-break:break-word}
+  .nota{margin-top:15px;padding-top:12px;border-top:1px solid var(--borde);
+        font-size:12px;color:var(--suave);line-height:1.6}
+
+  .puntos span{display:inline-block;width:6px;height:6px;border-radius:50%;
+               background:var(--suave);margin-right:4px;animation:late 1.3s infinite}
+  .puntos span:nth-child(2){animation-delay:.18s}
+  .puntos span:nth-child(3){animation-delay:.36s}
+  @keyframes late{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+
+  footer{border-top:1px solid var(--borde);background:var(--panel);padding:14px 22px}
+  .barra{max-width:820px;margin:0 auto;display:flex;gap:11px;align-items:center}
+  .soltar{flex:1;border:1.5px dashed var(--borde);border-radius:12px;padding:15px;
+          text-align:center;color:var(--suave);font-size:13.5px;cursor:pointer;
+          transition:.15s;background:var(--panel2)}
+  .soltar:hover,.soltar.encima{border-color:var(--acento);color:var(--texto);
+                               background:rgba(255,122,69,.07)}
+  .soltar.encima{border-style:solid}
+  button{background:var(--acento);color:#1a1005;border:0;border-radius:10px;
+         padding:13px 20px;font-size:13.5px;font-weight:650;cursor:pointer;font-family:inherit}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input[type=file]{display:none}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">🧾</div>
+  <div style="min-width:0">
+    <h1>Agente OCR de gastos</h1>
+    <div class="sub" id="destino">cargando…</div>
+  </div>
+  <div class="chip" id="credencial">…</div>
+</header>
+
+<main>
+  <div class="hilo" id="hilo">
+    <div class="vacio" id="vacio">
+      <div class="icono">🧾</div>
+      <h2>Envía la foto de un ticket</h2>
+      <p>Se manda al agente desplegado en Agent Manager, que la interpreta con un
+         modelo de visión a través del AI Gateway. Arrastra una imagen aquí abajo
+         o pega una del portapapeles.</p>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="barra">
+    <label class="soltar" id="soltar">
+      <input type="file" id="fichero" accept="image/*">
+      <span id="etiqueta">Arrastra una imagen, pégala, o haz clic para elegirla</span>
+    </label>
+    <button id="enviar" disabled>Analizar</button>
+  </div>
+</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const hilo = $('#hilo'), zona = $('#soltar'), etiqueta = $('#etiqueta');
+const input = $('#fichero'), boton = $('#enviar');
+let elegido = null;
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  $('#destino').textContent = c.agente_url;
+  const chip = $('#credencial');
+  chip.textContent = c.con_credencial ? 'X-API-Key ✓' : 'sin credencial';
+  chip.className = 'chip ' + (c.con_credencial ? 'on' : 'off');
+}).catch(() => {});
+
+function elegir(f) {
+  if (!f || !f.type.startsWith('image/')) return;
+  elegido = f;
+  etiqueta.textContent = f.name + ' · ' + (f.size / 1024).toFixed(0) + ' KB';
+  boton.disabled = false;
+}
+input.onchange = e => elegir(e.target.files[0]);
+['dragenter', 'dragover'].forEach(ev => zona.addEventListener(ev, e => {
+  e.preventDefault(); zona.classList.add('encima');
+}));
+['dragleave', 'drop'].forEach(ev => zona.addEventListener(ev, e => {
+  e.preventDefault(); zona.classList.remove('encima');
+}));
+zona.addEventListener('drop', e => elegir(e.dataTransfer.files[0]));
+window.addEventListener('paste', e => {
+  for (const it of e.clipboardData.items)
+    if (it.type.startsWith('image/')) { elegir(it.getAsFile()); break; }
+});
+
+function burbuja(quien, contenido) {
+  $('#vacio')?.remove();
+  const d = document.createElement('div');
+  d.className = 'msg ' + (quien === 'yo' ? 'yo' : '');
+  d.innerHTML = `<div class="av">${quien === 'yo' ? '📷' : '🤖'}</div>
+                 <div class="burbuja">${contenido}</div>`;
+  hilo.appendChild(d);
+  d.scrollIntoView({behavior: 'smooth', block: 'end'});
+  return d.querySelector('.burbuja');
+}
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dinero = (v, m) => v == null ? null :
+  v.toLocaleString('es-ES', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + (m ? ' ' + m : '');
+const dato = v => v == null || v === '' ? '<span class="nulo">no consta</span>' : esc(v);
+
+function ficha(d) {
+  const g = d.gasto || {}, c = d.cuadre || {}, avisos = d.advertencias || [];
+  let h = '<div class="ficha">';
+
+  h += '<div class="tit">Justificante</div><dl class="rejilla">';
+  h += `<dt>Tipo</dt><dd>${dato(g.tipo_documento)}</dd>`;
+  h += `<dt>Comercio</dt><dd>${dato(g.comercio)}</dd>`;
+  h += `<dt>Fecha</dt><dd>${dato(g.fecha)}</dd>`;
+  h += `<dt>Pago</dt><dd>${dato(g.metodo_pago)}</dd>`;
+  h += `<dt>Categoría</dt><dd>${dato(g.categoria_estimada)}</dd>`;
+  h += '</dl>';
+
+  h += '<div class="tit">Importes</div><dl class="rejilla">';
+  h += `<dt>Total</dt><dd class="destacado">${dato(dinero(g.total, g.moneda))}</dd>`;
+  h += `<dt>Base</dt><dd>${dato(dinero(g.base_imponible, g.moneda))}</dd>`;
+  h += `<dt>Impuestos</dt><dd>${dato(dinero(g.impuestos, g.moneda))}</dd>`;
+  h += '</dl>';
+
+  const ls = g.lineas_principales || [];
+  if (ls.length) {
+    h += `<div class="tit">Líneas (${ls.length})</div><table>`;
+    for (const l of ls)
+      h += `<tr><td class="n">${l.cantidad ? esc(l.cantidad) + '×' : ''}</td>
+                <td>${dato(l.descripcion)}</td>
+                <td class="i">${dato(dinero(l.importe, ''))}</td></tr>`;
+    h += '</table>';
+  }
+
+  const checks = [
+    ['base_mas_impuestos_igual_total', 'base + impuestos = total'],
+    ['lineas_cuadran', 'las líneas suman la base'],
+  ].filter(([k]) => k in c);
+  if (checks.length) {
+    h += '<div class="tit">Comprobaciones aritméticas</div>';
+    for (const [k, t] of checks)
+      h += `<div class="chk ${c[k] ? 'ok' : 'mal'}"><span class="m">${c[k] ? '✓' : '✗'}</span>${t}</div>`;
+    if (c.total_calculado != null)
+      h += `<div class="calc">total calculado ${c.total_calculado} · suma de líneas ${c.suma_lineas ?? '—'}</div>`;
+    for (const m of c.lineas_descuadradas || [])
+      h += `<div class="chk mal"><span class="m">✗</span>${esc(m.descripcion)}: declara
+            ${esc(m.importe_declarado)}, calculado ${esc(m.importe_calculado)}</div>`;
+  }
+
+  h += '<div class="tit">Advertencias</div>';
+  h += avisos.length
+    ? avisos.map(a => `<div class="aviso"><span class="m">▲</span><span>${esc(a)}</span></div>`).join('')
+    : '<div class="sinavisos">✓ ninguna</div>';
+
+  const t = d.tokens || {};
+  h += `<div class="nota">modelo <b>${esc(d.modelo)}</b> · ${t.total ?? '?'} tokens
+        (${t.entrada ?? '?'} entrada / ${t.salida ?? '?'} salida) · ${d._segundos ?? '?'} s<br>
+        El gasto <b>no</b> se ha registrado: hace falta confirmación explícita.</div>`;
+  return h + '</div>';
+}
+
+async function enviar() {
+  if (!elegido) return;
+  const f = elegido;
+  boton.disabled = true;
+  const url = URL.createObjectURL(f);
+  burbuja('yo', `<img src="${url}" alt="${esc(f.name)}">
+                 <div class="pie">${esc(f.name)} · ${(f.size / 1024).toFixed(0)} KB</div>`);
+
+  elegido = null;
+  input.value = '';
+  etiqueta.textContent = 'Arrastra una imagen, pégala, o haz clic para elegirla';
+
+  const espera = burbuja('bot',
+    '<span class="puntos"><span></span><span></span><span></span></span> analizando el documento…');
+
+  try {
+    const fd = new FormData();
+    fd.append('fichero', f, f.name);
+    const r = await fetch('/api/analizar', {method: 'POST', body: fd});
+    const d = await r.json();
+    espera.innerHTML = r.ok && d.gasto ? ficha(d)
+      : `<div class="error"><b>${esc(d.error || 'Error')}</b>
+         ${d.pista ? '<div style="margin-top:6px">' + esc(d.pista) + '</div>' : ''}
+         <code>${esc(d.detalle || '')}</code></div>`;
+  } catch (e) {
+    espera.innerHTML = `<div class="error"><b>No se ha podido contactar con el servidor</b>
+                        <code>${esc(e.message)}</code></div>`;
+  }
+  espera.scrollIntoView({behavior: 'smooth', block: 'end'});
+}
+
+boton.onclick = enviar;
+</script>
+</body>
+</html>

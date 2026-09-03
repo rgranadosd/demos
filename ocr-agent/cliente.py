@@ -28,6 +28,31 @@ import urllib.error
 import urllib.request
 import uuid
 
+def _cargar_config_local():
+    """Lee credenciales de `.env`, junto a este script.
+
+    Para la demo hace falta poder ejecutar `./cliente.py foto.png` y ya. Pero
+    este repositorio es público, así que la clave NO puede vivir en el código.
+    El fichero está en .gitignore: la comodidad se queda en local y el secreto
+    no viaja a GitHub. Las variables ya presentes en el entorno mandan.
+    """
+    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(ruta):
+        return
+    with open(ruta) as fh:
+        for linea in fh:
+            linea = linea.strip()
+            if not linea or linea.startswith("#") or "=" not in linea:
+                continue
+            clave, valor = linea.split("=", 1)
+            clave = clave.strip()
+            valor = valor.strip().strip('"').strip("'")
+            if clave and clave not in os.environ:
+                os.environ[clave] = valor
+
+
+_cargar_config_local()
+
 URL_POR_DEFECTO = os.getenv(
     "OCR_AGENT_URL",
     "http://default-default.am-gateway.localhost:19080/ocr-agent-ocr-agent-endpoint",
