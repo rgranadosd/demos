@@ -98,6 +98,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(codigo)
         self.send_header("Content-Type", tipo)
         self.send_header("Content-Length", str(len(datos)))
+        # Sin esto el navegador se queda con la versión cacheada de chat.html y
+        # los cambios no aparecen aunque recargues. En una demo que se retoca
+        # sobre la marcha, eso hace perder un rato buscando un fallo que no existe.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(datos)
 

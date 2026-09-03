@@ -97,6 +97,15 @@
   button.sec.activo{color:var(--acento);border-color:var(--acento);
                     background:rgba(255,122,69,.09)}
   button.reintentar{padding:8px 14px;font-size:12.5px;border-radius:8px}
+  .medidor{position:absolute;left:0;right:0;bottom:0;padding:10px 14px;
+           background:linear-gradient(transparent,rgba(0,0,0,.75));pointer-events:none}
+  .medidor .txt{font-size:12px;color:#fff;text-shadow:0 1px 3px #000;
+                display:flex;justify-content:space-between;margin-bottom:6px}
+  .medidor .txt .num{font-family:var(--mono);opacity:.7;font-size:11px}
+  .barra-foco{height:4px;border-radius:2px;background:rgba(255,255,255,.2);overflow:hidden}
+  .barra-foco i{display:block;height:100%;width:0;background:var(--aviso);
+                transition:width .15s linear,background .2s}
+  .barra-foco.listo i{background:var(--ok)}
   .camara .guia{position:absolute;inset:8% 18%;border:2px dashed rgba(255,255,255,.35);
                 border-radius:10px;pointer-events:none}
   .camara .mandos{display:flex;gap:10px;justify-content:center;padding:12px;
@@ -149,8 +158,14 @@
     <video id="video" playsinline autoplay muted></video>
     <div class="guia"></div>
     <div class="pista">Encuadra el ticket en el marco. Si lo ves invertido, pulsa Espejo</div>
+    <div class="medidor">
+      <div class="txt"><span id="estadofoco">preparando…</span>
+                       <span class="num" id="numfoco"></span></div>
+      <div class="barra-foco" id="barrafoco"><i></i></div>
+    </div>
     <div class="mandos">
       <button id="capturar">Capturar y analizar</button>
+      <button class="sec" id="auto" title="Captura sola cuando la imagen está enfocada y quieta">⏱ Auto</button>
       <button class="sec" id="espejo" title="Voltea la imagen en horizontal">⇋ Espejo</button>
       <button class="sec" id="cerrarcam">Cancelar</button>
     </div>
@@ -395,11 +410,14 @@ async function abrirCamara() {
   }
   video.srcObject = flujo;
   pintarEspejo();
+  pintarAuto();
   panel.classList.add('abierta');
+  video.onloadedmetadata = arrancarMedidor;
   $('#abrircam').disabled = true;
 }
 
 function cerrarCamara() {
+  pararMedidor();
   if (flujo) flujo.getTracks().forEach(t => t.stop());   // apaga el piloto
   flujo = null;
   video.srcObject = null;
@@ -409,6 +427,7 @@ function cerrarCamara() {
 
 function capturar() {
   if (!flujo) return;
+  pararMedidor();   // sin esto el tick siguiente dispararía una segunda captura
   const lienzo = document.createElement('canvas');
   lienzo.width  = video.videoWidth;
   lienzo.height = video.videoHeight;
@@ -431,6 +450,115 @@ function capturar() {
     enviar();          // una foto se hace para analizarla: no hace falta otro clic
   }, 'image/jpeg', 0.92);
 }
+
+/* ─── enfoque automático ─────────────────────────────────────────────────────
+   Se muestrea el vídeo en pequeño y se miden dos cosas:
+
+     nitidez     laplaciano medio. Cae en picado al desenfocar: sobre un ticket
+                 real medí 13,4 nítido frente a 2,9 con 1px de desenfoque.
+     movimiento  diferencia media con el fotograma anterior.
+
+   El umbral es RELATIVO al mejor enfoque visto desde que se abrió la cámara,
+   no un número fijo: el valor absoluto depende de la cámara, la luz y de lo
+   que haya delante, así que un umbral fijo funcionaría en una mesa y no en
+   otra. Se exige además un mínimo absoluto para no disparar sobre una pared
+   lisa, donde todo está "igual de enfocado" porque no hay nada que enfocar. */
+const MUESTREO_MS   = 200;
+const ANCHO_MUESTRA = 320;
+const MOV_MAX       = 3.5;   // por encima de esto, la mano se mueve
+const NITIDEZ_MIN   = 2.5;   // suelo absoluto: evita disparar sobre una pared
+const FRACCION_MEJOR= 0.65;  // hay que llegar al 65% del mejor enfoque visto
+const ESTABLES      = 4;     // ~0,8 s seguidos en verde antes de disparar
+const CALENTAMIENTO = 8;     // muestras antes de permitir un disparo
+
+let auto = localStorage.getItem('ocr_auto') !== '0';
+let temporizador = null, previo = null, mejor = 0, seguidas = 0, muestras = 0;
+const lienzoMuestra = document.createElement('canvas');
+
+function grises(w, h) {
+  const ctx = lienzoMuestra.getContext('2d', {willReadFrequently: true});
+  ctx.drawImage(video, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < d.length; i += 4, p++)
+    g[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  return g;
+}
+
+function medir() {
+  if (!flujo || !video.videoWidth) return null;
+  const w = ANCHO_MUESTRA;
+  const h = Math.round(w * video.videoHeight / video.videoWidth);
+  lienzoMuestra.width = w; lienzoMuestra.height = h;
+  const g = grises(w, h);
+
+  let suma = 0, n = 0;
+  for (let y = 1; y < h - 1; y++)
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      suma += Math.abs(4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]);
+      n++;
+    }
+  const nitidez = suma / n;
+
+  let mov = 0;
+  if (previo && previo.length === g.length) {
+    let s = 0;
+    for (let i = 0; i < g.length; i++) s += Math.abs(g[i] - previo[i]);
+    mov = s / g.length;
+  } else {
+    mov = Infinity;   // primer fotograma: no hay con qué comparar
+  }
+  previo = g;
+  return {nitidez, mov};
+}
+
+function tick() {
+  const m = medir();
+  if (!m) return;
+  muestras++;
+  // El mejor decae despacio para readaptarse si cambia la luz o la escena.
+  mejor = Math.max(m.nitidez, mejor * 0.995);
+
+  const objetivo = Math.max(NITIDEZ_MIN, mejor * FRACCION_MEJOR);
+  const quieto   = m.mov < MOV_MAX;
+  const enfocado = m.nitidez >= objetivo;
+  const listo    = quieto && enfocado && muestras > CALENTAMIENTO;
+
+  seguidas = listo ? seguidas + 1 : 0;
+
+  const pct = Math.min(100, Math.round(100 * m.nitidez / (mejor || 1)));
+  $('#barrafoco').firstElementChild.style.width = pct + '%';
+  $('#barrafoco').classList.toggle('listo', listo);
+  $('#numfoco').textContent =
+    `nitidez ${m.nitidez.toFixed(1)} · mov ${m.mov === Infinity ? '—' : m.mov.toFixed(1)}`;
+  $('#estadofoco').textContent = !auto ? 'automático desactivado'
+    : muestras <= CALENTAMIENTO ? 'calibrando…'
+    : !quieto ? 'mantén la cámara quieta'
+    : !enfocado ? 'acércate o busca el enfoque'
+    : `enfocado — capturando en ${Math.max(0, ESTABLES - seguidas)}…`;
+
+  if (auto && seguidas >= ESTABLES) capturar();
+}
+
+function arrancarMedidor() {
+  previo = null; mejor = 0; seguidas = 0; muestras = 0;
+  clearInterval(temporizador);
+  temporizador = setInterval(tick, MUESTREO_MS);
+}
+
+function pararMedidor() {
+  clearInterval(temporizador);
+  temporizador = null;
+}
+
+function pintarAuto() { $('#auto').classList.toggle('activo', auto); }
+
+$('#auto').onclick = () => {
+  auto = !auto;
+  localStorage.setItem('ocr_auto', auto ? '1' : '0');
+  pintarAuto();
+};
 
 $('#espejo').onclick = () => {
   espejo = !espejo;

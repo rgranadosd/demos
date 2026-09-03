@@ -82,6 +82,26 @@ prueba, 55,50 € donde ponía 61,49). Lo único que lo delató fue la comprobac
 aritmética. Es la mejor defensa del diseño: verificar en código lo que el
 modelo no va a confesar.
 
+### Captura automática
+
+Con **⏱ Auto** activado (por defecto) no hace falta pulsar nada: la cámara mide
+cada 200 ms la nitidez y el movimiento, y dispara sola cuando la imagen lleva
+unos 0,8 s enfocada y quieta. La barra de abajo muestra el nivel y el estado
+(`calibrando`, `mantén la cámara quieta`, `acércate o busca el enfoque`,
+`enfocado — capturando en 2…`).
+
+La nitidez es el laplaciano medio, que se desploma al desenfocar: sobre un
+ticket real, 13,4 nítido frente a 2,9 con 1 px de desenfoque. El umbral es
+**relativo** al mejor enfoque visto desde que se abrió la cámara, no un número
+fijo — el valor absoluto depende de la cámara, la luz y de lo que haya delante,
+así que un umbral fijo acertaría en una mesa y fallaría en otra. Hay además un
+suelo absoluto para no disparar sobre una pared lisa, donde todo está «igual de
+enfocado» porque no hay nada que enfocar.
+
+La máquina de estados está probada con secuencias simuladas: no dispara sobre
+una pared, ni con la mano en movimiento, ni con la imagen borrosa aunque esté
+quieta; y dispara a las cuatro muestras de estabilizarse.
+
 La cámara pide la resolución más alta disponible (1920×1080 si la hay): un
 ticket tiene letra pequeña y a 640×480 el modelo no lee los importes. La
 captura se envía sola, sin un clic extra, y el piloto de la cámara se apaga al
