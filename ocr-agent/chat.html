@@ -96,6 +96,7 @@
   .camara video.espejo{transform:scaleX(-1)}
   button.sec.activo{color:var(--acento);border-color:var(--acento);
                     background:rgba(255,122,69,.09)}
+  button.reintentar{padding:8px 14px;font-size:12.5px;border-radius:8px}
   .camara .guia{position:absolute;inset:8% 18%;border:2px dashed rgba(255,255,255,.35);
                 border-radius:10px;pointer-events:none}
   .camara .mandos{display:flex;gap:10px;justify-content:center;padding:12px;
@@ -268,33 +269,83 @@ function ficha(d) {
   return h + '</div>';
 }
 
-async function enviar() {
-  if (!elegido) return;
-  const f = elegido;
+/* ─── envío con reintentos ───────────────────────────────────────────────────
+   Solo se reintentan los fallos pasajeros: el 504 del timeout de la ruta, un
+   502/503 del gateway, un corte de red. Un 401 o un 400 no se arreglan
+   repitiéndolos — insistir tres veces solo alarga el fallo y, en una demo,
+   hace que parezca peor de lo que es.                                        */
+const MAX_INTENTOS = 3;
+const TRANSITORIOS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const pausa = ms => new Promise(r => setTimeout(r, ms));
+
+function pintarEspera(nodo, intento) {
+  const puntos = '<span class="puntos"><span></span><span></span><span></span></span>';
+  nodo.innerHTML = intento === 1
+    ? `${puntos} analizando el documento…`
+    : `${puntos} reintentando… <span class="pie" style="margin:0 0 0 4px">
+       intento ${intento} de ${MAX_INTENTOS}</span>`;
+}
+
+function tarjetaError(d, codigo, intentos) {
+  const reintentado = intentos > 1
+    ? `<div class="pie" style="margin-top:8px">Se intentó ${intentos} veces.</div>` : '';
+  return `<div class="error">
+    <b>${esc(d.error || (codigo ? 'HTTP ' + codigo : 'Error'))}</b>
+    ${d.pista ? `<div style="margin-top:6px">${esc(d.pista)}</div>` : ''}
+    ${d.detalle ? `<code>${esc(d.detalle)}</code>` : ''}
+    ${reintentado}
+    <div style="margin-top:12px"><button class="reintentar">↻ Reintentar</button></div>
+  </div>`;
+}
+
+async function pedir(f, espera) {
+  for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
+    pintarEspera(espera, intento);
+    try {
+      const fd = new FormData();
+      fd.append('fichero', f, f.name);
+      const r = await fetch('/api/analizar', {method: 'POST', body: fd});
+      const d = await r.json();
+      if (r.ok && d.gasto) return {ok: true, datos: d};
+      if (!TRANSITORIOS.has(r.status) || intento === MAX_INTENTOS)
+        return {ok: false, datos: d, codigo: r.status, intentos: intento};
+    } catch (e) {
+      if (intento === MAX_INTENTOS)
+        return {ok: false, intentos: intento,
+                datos: {error: 'No se ha podido contactar con el servidor',
+                        detalle: e.message}};
+    }
+    await pausa(1500);
+  }
+}
+
+async function enviar(fichero) {
+  const f = fichero || elegido;
+  if (!f) return;
   boton.disabled = true;
-  const url = URL.createObjectURL(f);
-  burbuja('yo', `<img src="${url}" alt="${esc(f.name)}">
-                 <div class="pie">${esc(f.name)} · ${(f.size / 1024).toFixed(0)} KB</div>`);
 
-  elegido = null;
-  input.value = '';
-  etiqueta.textContent = 'Arrastra una imagen, pégala, o haz clic para elegirla';
+  if (!fichero) {              // primer envío: se muestra la foto en el hilo
+    const url = URL.createObjectURL(f);
+    burbuja('yo', `<img src="${url}" alt="${esc(f.name)}">
+                   <div class="pie">${esc(f.name)} · ${(f.size / 1024).toFixed(0)} KB</div>`);
+    elegido = null;
+    input.value = '';
+    etiqueta.textContent = 'Arrastra una imagen, pégala, o haz clic para elegirla';
+  }
 
-  const espera = burbuja('bot',
-    '<span class="puntos"><span></span><span></span><span></span></span> analizando el documento…');
+  const espera = burbuja('bot', '');
+  const res = await pedir(f, espera);
 
-  try {
-    const fd = new FormData();
-    fd.append('fichero', f, f.name);
-    const r = await fetch('/api/analizar', {method: 'POST', body: fd});
-    const d = await r.json();
-    espera.innerHTML = r.ok && d.gasto ? ficha(d)
-      : `<div class="error"><b>${esc(d.error || 'Error')}</b>
-         ${d.pista ? '<div style="margin-top:6px">' + esc(d.pista) + '</div>' : ''}
-         <code>${esc(d.detalle || '')}</code></div>`;
-  } catch (e) {
-    espera.innerHTML = `<div class="error"><b>No se ha podido contactar con el servidor</b>
-                        <code>${esc(e.message)}</code></div>`;
+  if (res.ok) {
+    espera.innerHTML = ficha(res.datos);
+  } else {
+    espera.innerHTML = tarjetaError(res.datos, res.codigo, res.intentos);
+    // El fichero se conserva en el cierre, así que el botón reenvía esa misma
+    // foto: en una demo no se puede pedir que la vuelvan a hacer.
+    espera.querySelector('.reintentar').onclick = () => {
+      espera.closest('.msg').remove();
+      enviar(f);
+    };
   }
   espera.scrollIntoView({behavior: 'smooth', block: 'end'});
 }

@@ -96,6 +96,17 @@ abrir las DevTools y no enseñar el secreto.
 La cabecera de la interfaz muestra a qué URL se está llamando y si hay
 credencial. En una demo eso importa: se ve que el tráfico entra por el gateway.
 
+### Reintentos
+
+Un envío fallido se reintenta hasta **3 veces** de forma automática, y la
+burbuja va indicando `intento 2 de 3`. Si aun así falla, la tarjeta de error
+trae un botón **↻ Reintentar** que reenvía *la misma foto*: en una demo no se
+puede pedir que la vuelvan a hacer.
+
+Solo se reintentan los fallos pasajeros — 408, 425, 429, 500, 502, 503, 504 y
+los cortes de red. Un `401` o un `400` fallan al primer intento: no se arreglan
+repitiéndolos, e insistir solo alarga el fallo delante del público.
+
 ### Credenciales
 
 Crea un `.env` junto al código (está en `.gitignore`, nunca va al repo):
