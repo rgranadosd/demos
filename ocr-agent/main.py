@@ -433,3 +433,16 @@ def registrar(peticion: PeticionRegistro) -> Dict[str, Any]:
         ),
         "datos_a_enviar": peticion.gasto.model_dump(),
     }
+
+
+if __name__ == "__main__":
+    # Permite arrancarlo con `python main.py`, que es el comando por defecto del
+    # formulario de AMP. Respeta PORT si la plataforma lo inyecta, en vez de
+    # clavar el 8080 y quedarse sin recibir tráfico si asigna otro.
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8080")),
+    )
