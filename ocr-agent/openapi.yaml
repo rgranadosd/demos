@@ -1,0 +1,297 @@
+openapi: 3.1.0
+info:
+  title: ocr-agent — análisis de justificantes de gasto
+  description: Interpreta tickets, facturas y recibos con un modelo de visión servido
+    a través del AI Gateway de Agent Manager.
+  version: 1.0.0
+paths:
+  /health:
+    get:
+      summary: Health
+      description: Estado y, sobre todo, qué LLM le ha asignado AMP.
+      operationId: health_health_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Health Health Get
+  /gastos/analizar:
+    post:
+      summary: Analizar
+      description: Analiza un justificante. Nunca registra nada.
+      operationId: analizar_gastos_analizar_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PeticionBase64'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Analisis'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /gastos/analizar/fichero:
+    post:
+      summary: Analizar Fichero
+      description: Igual que /gastos/analizar, subiendo el fichero directamente.
+      operationId: analizar_fichero_gastos_analizar_fichero_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_analizar_fichero_gastos_analizar_fichero_post'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Analisis'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /gastos/registrar:
+    post:
+      summary: Registrar
+      description: 'Registra el gasto, y solo con confirmación explícita.
+
+
+        Sin `confirmado: true` devuelve la vista previa de lo que se enviaría y no
+
+        registra nada. La regla vive aquí, en el código, no en el prompt: así no
+
+        depende de que el modelo se porte bien.'
+      operationId: registrar_gastos_registrar_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PeticionRegistro'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Registrar Gastos Registrar Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    Analisis:
+      properties:
+        gasto:
+          $ref: '#/components/schemas/Gasto'
+        legible:
+          type: boolean
+          title: Legible
+          default: true
+        cuadre:
+          additionalProperties: true
+          type: object
+          title: Cuadre
+        advertencias:
+          items:
+            type: string
+          type: array
+          title: Advertencias
+        modelo:
+          type: string
+          title: Modelo
+        tokens:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Tokens
+        registrado:
+          type: boolean
+          title: Registrado
+          default: false
+      type: object
+      required:
+      - gasto
+      - modelo
+      title: Analisis
+    Body_analizar_fichero_gastos_analizar_fichero_post:
+      properties:
+        fichero:
+          type: string
+          format: binary
+          title: Fichero
+      type: object
+      required:
+      - fichero
+      title: Body_analizar_fichero_gastos_analizar_fichero_post
+    Gasto:
+      properties:
+        tipo_documento:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tipo Documento
+          description: ticket | factura | recibo | otro
+        comercio:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Comercio
+        fecha:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Fecha
+        total:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Total
+        moneda:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Moneda
+        impuestos:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Impuestos
+        base_imponible:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Base Imponible
+        metodo_pago:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Metodo Pago
+        categoria_estimada:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Categoria Estimada
+        lineas_principales:
+          items:
+            $ref: '#/components/schemas/LineaGasto'
+          type: array
+          title: Lineas Principales
+        resumen:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Resumen
+      type: object
+      title: Gasto
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    LineaGasto:
+      properties:
+        descripcion:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Descripcion
+        cantidad:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Cantidad
+        precio_unitario:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Precio Unitario
+        importe:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Importe
+      type: object
+      title: LineaGasto
+    PeticionBase64:
+      properties:
+        imagen_base64:
+          type: string
+          title: Imagen Base64
+          description: 'Imagen del justificante, sin cabecera data:'
+        mime_type:
+          type: string
+          title: Mime Type
+          default: image/jpeg
+      type: object
+      required:
+      - imagen_base64
+      title: PeticionBase64
+    PeticionRegistro:
+      properties:
+        gasto:
+          $ref: '#/components/schemas/Gasto'
+        confirmado:
+          type: boolean
+          title: Confirmado
+          description: Debe ser true. Sin ella el agente devuelve la vista previa
+            y no registra nada.
+          default: false
+      type: object
+      required:
+      - gasto
+      title: PeticionRegistro
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+servers:
+- url: /
