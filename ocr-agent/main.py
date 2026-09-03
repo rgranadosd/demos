@@ -169,14 +169,38 @@ def _cliente() -> tuple:
             ),
         )
 
+    # AMP autentica al consumidor (agente -> gateway) con la clave de suscripción
+    # en una cabecera dedicada, X-API-Key por defecto. El SDK de OpenAI inyecta
+    # siempre "Authorization: Bearer <api_key>", y esa cabecera NO puede llegar
+    # al proveedor: la seguridad del gateway es la dueña del Authorization
+    # upstream (el "Bearer <clave del proveedor>" real). Si se deja pasar, el
+    # gateway responde 401 "Valid API key required".
+    #
+    # Así que la clave viaja en la cabecera de consumidor y el Authorization se
+    # borra en el hook de salida. Es el mismo patrón que usan los agentes
+    # cpc-studio en common/llm_utils.py.
+    consumer_header = os.getenv("AMP_LLM_CONSUMER_HEADER", "X-API-Key").strip() or "X-API-Key"
+
+    def _quitar_authorization(request: httpx.Request) -> None:
+        request.headers.pop("authorization", None)
+
+    cabeceras = {
+        consumer_header: binding.api_key,
+        "API-Key": binding.api_key,  # la cabecera de consumidor propia del proxy
+    }
     # El override de Host solo se manda cuando la dirección tuvo que traducirse.
-    http_client = (
-        httpx.Client(headers={"Host": binding.host}, timeout=300.0)
-        if binding.host
-        else httpx.Client(timeout=300.0)
+    if binding.host:
+        cabeceras["Host"] = binding.host
+
+    http_client = httpx.Client(
+        headers=cabeceras,
+        timeout=300.0,
+        event_hooks={"request": [_quitar_authorization]},
     )
     cliente = OpenAI(
-        base_url=binding.base_url, api_key=binding.api_key, http_client=http_client
+        base_url=binding.base_url,
+        api_key="amp-managed",  # placeholder: se elimina antes de salir
+        http_client=http_client,
     )
     return cliente, modelo, binding
 
