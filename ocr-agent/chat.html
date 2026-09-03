@@ -89,6 +89,20 @@
   .puntos span:nth-child(3){animation-delay:.36s}
   @keyframes late{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
 
+  .camara{max-width:820px;margin:0 auto 12px;border:1px solid var(--borde);
+          border-radius:14px;overflow:hidden;background:#000;position:relative;display:none}
+  .camara.abierta{display:block}
+  .camara video{width:100%;max-height:46vh;object-fit:contain;display:block}
+  .camara .guia{position:absolute;inset:8% 18%;border:2px dashed rgba(255,255,255,.35);
+                border-radius:10px;pointer-events:none}
+  .camara .mandos{display:flex;gap:10px;justify-content:center;padding:12px;
+                  background:var(--panel);border-top:1px solid var(--borde)}
+  .camara .pista{position:absolute;top:10px;left:0;right:0;text-align:center;
+                 font-size:12px;color:rgba(255,255,255,.75);text-shadow:0 1px 3px #000;
+                 pointer-events:none}
+  button.sec{background:transparent;color:var(--suave);border:1px solid var(--borde)}
+  button.sec:hover{color:var(--texto);border-color:var(--suave)}
+
   footer{border-top:1px solid var(--borde);background:var(--panel);padding:14px 22px}
   .barra{max-width:820px;margin:0 auto;display:flex;gap:11px;align-items:center}
   .soltar{flex:1;border:1.5px dashed var(--borde);border-radius:12px;padding:15px;
@@ -120,18 +134,28 @@
       <div class="icono">🧾</div>
       <h2>Envía la foto de un ticket</h2>
       <p>Se manda al agente desplegado en Agent Manager, que la interpreta con un
-         modelo de visión a través del AI Gateway. Arrastra una imagen aquí abajo
-         o pega una del portapapeles.</p>
+         modelo de visión a través del AI Gateway. Arrastra una imagen aquí abajo, pégala del portapapeles,
+         o hazle una foto con la cámara.</p>
     </div>
   </div>
 </main>
 
 <footer>
+  <div class="camara" id="camara">
+    <video id="video" playsinline autoplay muted></video>
+    <div class="guia"></div>
+    <div class="pista">Encuadra el ticket dentro del marco y que se lea bien</div>
+    <div class="mandos">
+      <button id="capturar">Capturar y analizar</button>
+      <button class="sec" id="cerrarcam">Cancelar</button>
+    </div>
+  </div>
   <div class="barra">
     <label class="soltar" id="soltar">
       <input type="file" id="fichero" accept="image/*">
       <span id="etiqueta">Arrastra una imagen, pégala, o haz clic para elegirla</span>
     </label>
+    <button class="sec" id="abrircam" title="Capturar con la webcam">📸 Cámara</button>
     <button id="enviar" disabled>Analizar</button>
   </div>
 </footer>
@@ -272,6 +296,69 @@ async function enviar() {
 }
 
 boton.onclick = enviar;
+
+/* ─── webcam ────────────────────────────────────────────────────────────────
+   getUserMedia exige contexto seguro, pero los navegadores tratan
+   127.0.0.1 como tal, así que funciona sin HTTPS. Se pide la resolución más
+   alta que dé la cámara: un ticket tiene letra pequeña y a 640×480 el modelo
+   no lee los importes.                                                       */
+const panel = $('#camara'), video = $('#video');
+let flujo = null;
+
+async function abrirCamara() {
+  try {
+    flujo = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width:  {ideal: 1920},
+        height: {ideal: 1080},
+        facingMode: {ideal: 'environment'},   // en móvil, la trasera
+      },
+      audio: false,
+    });
+  } catch (e) {
+    const motivo = e.name === 'NotAllowedError'
+      ? 'Has denegado el permiso de cámara. Habilítalo en los ajustes del navegador.'
+      : e.name === 'NotFoundError'
+        ? 'No se ha encontrado ninguna cámara.'
+        : e.message;
+    burbuja('bot', `<div class="error"><b>No se puede usar la cámara</b>
+                    <div style="margin-top:6px">${esc(motivo)}</div></div>`);
+    return;
+  }
+  video.srcObject = flujo;
+  panel.classList.add('abierta');
+  $('#abrircam').disabled = true;
+}
+
+function cerrarCamara() {
+  if (flujo) flujo.getTracks().forEach(t => t.stop());   // apaga el piloto
+  flujo = null;
+  video.srcObject = null;
+  panel.classList.remove('abierta');
+  $('#abrircam').disabled = false;
+}
+
+function capturar() {
+  if (!flujo) return;
+  const lienzo = document.createElement('canvas');
+  lienzo.width  = video.videoWidth;
+  lienzo.height = video.videoHeight;
+  lienzo.getContext('2d').drawImage(video, 0, 0);
+  // JPEG con calidad alta: un PNG de 1920×1080 son varios MB y solo añade
+  // tiempo de subida sin mejorar lo que el modelo es capaz de leer.
+  lienzo.toBlob(b => {
+    if (!b) return;
+    const sello = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+    elegir(new File([b], `captura-${sello}.jpg`, {type: 'image/jpeg'}));
+    cerrarCamara();
+    enviar();          // una foto se hace para analizarla: no hace falta otro clic
+  }, 'image/jpeg', 0.92);
+}
+
+$('#abrircam').onclick  = abrirCamara;
+$('#cerrarcam').onclick = cerrarCamara;
+$('#capturar').onclick  = capturar;
+window.addEventListener('beforeunload', cerrarCamara);
 </script>
 </body>
 </html>

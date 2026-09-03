@@ -68,8 +68,15 @@ Todo lo inyecta AMP al desplegar. Estas variables solo se tocan en local:
 ./servidor.py          # abre http://127.0.0.1:8800
 ```
 
-Arrastra la foto de un ticket, pégala del portapapeles o elígela, y sale la
-ficha del gasto: campos, líneas, comprobaciones aritméticas y advertencias.
+Tres formas de enviar un justificante: arrastrarlo, pegarlo del portapapeles,
+o **hacerle una foto con la cámara**. Sale la ficha del gasto: campos, líneas,
+comprobaciones aritméticas y advertencias.
+
+La cámara pide la resolución más alta disponible (1920×1080 si la hay): un
+ticket tiene letra pequeña y a 640×480 el modelo no lee los importes. La
+captura se envía sola, sin un clic extra, y el piloto de la cámara se apaga al
+cerrar. Funciona sin HTTPS porque los navegadores tratan `127.0.0.1` como
+contexto seguro.
 
 El servidor hace de intermediario a propósito: **el navegador nunca ve la API
 key**. La petición sale de él sin credencial y el servidor la reenvía al gateway
