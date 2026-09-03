@@ -403,7 +403,10 @@ async function abrirCamara() {
   video.srcObject = flujo;
   video.classList.toggle('espejo', ESPEJO);
   panel.classList.add('abierta');
-  video.onloadedmetadata = arrancarMedidor;
+  // Si los metadatos ya estaban cargados el evento no vuelve a dispararse y el
+  // medidor no arrancaría nunca. Se engancha Y se comprueba.
+  video.addEventListener('loadedmetadata', arrancarMedidor, {once: true});
+  if (video.videoWidth) arrancarMedidor();
   $('#abrircam').disabled = true;
 }
 
@@ -456,14 +459,26 @@ function capturar() {
    lisa, donde todo está "igual de enfocado" porque no hay nada que enfocar. */
 const MUESTREO_MS   = 200;
 const ANCHO_MUESTRA = 320;
-const MOV_MAX       = 3.5;   // por encima de esto, la mano se mueve
 const NITIDEZ_MIN   = 2.5;   // suelo absoluto: evita disparar sobre una pared
 const FRACCION_MEJOR= 0.65;  // hay que llegar al 65% del mejor enfoque visto
 const ESTABLES      = 4;     // ~0,8 s seguidos en verde antes de disparar
 const CALENTAMIENTO = 8;     // muestras antes de permitir un disparo
+// El movimiento tampoco puede compararse contra un número fijo: el ruido del
+// sensor de una webcam ya produce diferencias de varios niveles entre
+// fotogramas consecutivos, y con poca luz mucho más. Un 3,5 fijo hacía que
+// "quieto" no se cumpliera nunca. Se mide el suelo de ruido de ESTA cámara y
+// se exige estar cerca de él.
+const MOV_HOLGURA   = 2.2;   // hasta 2,2 veces el ruido de fondo se da por quieto
+const MOV_SUELO     = 1.0;   // por debajo de esto siempre cuenta como quieto
+// Techo absoluto. Sin él, una mano que se mueve sin parar acaba definiendo el
+// "ruido de fondo" y todo movimiento pasa por quieto: el suelo adaptativo se
+// calibra sobre el propio temblor. El ruido real de un sensor con luz decente
+// ronda 1-5; por encima de 12 hay movimiento de verdad, venga de donde venga.
+const MOV_TECHO     = 12;
 
 const AUTO = true;   // el disparo automático es el modo normal
 let temporizador = null, previo = null, mejor = 0, seguidas = 0, muestras = 0;
+let ruido = Infinity;   // suelo de movimiento observado en esta cámara
 const lienzoMuestra = document.createElement('canvas');
 
 function grises(w, h) {
@@ -508,12 +523,14 @@ function tick() {
   const m = medir();
   if (!m) return;
   muestras++;
-  // El mejor decae despacio para readaptarse si cambia la luz o la escena.
+  // Ambos límites decaen despacio para readaptarse si cambia la luz o la escena.
   mejor = Math.max(m.nitidez, mejor * 0.995);
+  if (isFinite(m.mov)) ruido = Math.min(m.mov, ruido * 1.005);
 
-  const objetivo = Math.max(NITIDEZ_MIN, mejor * FRACCION_MEJOR);
-  const quieto   = m.mov < MOV_MAX;
-  const enfocado = m.nitidez >= objetivo;
+  const objFoco = Math.max(NITIDEZ_MIN, mejor * FRACCION_MEJOR);
+  const objMov  = Math.min(MOV_TECHO, Math.max(MOV_SUELO, ruido * MOV_HOLGURA));
+  const quieto   = m.mov <= objMov;
+  const enfocado = m.nitidez >= objFoco;
   const listo    = quieto && enfocado && muestras > CALENTAMIENTO;
 
   seguidas = listo ? seguidas + 1 : 0;
@@ -521,8 +538,11 @@ function tick() {
   const pct = Math.min(100, Math.round(100 * m.nitidez / (mejor || 1)));
   $('#barrafoco').firstElementChild.style.width = pct + '%';
   $('#barrafoco').classList.toggle('listo', listo);
+  // Se muestra actual/exigido en ambos: si no dispara, se ve en el acto cuál
+  // de las dos condiciones falla.
   $('#numfoco').textContent =
-    `nitidez ${m.nitidez.toFixed(1)} · mov ${m.mov === Infinity ? '—' : m.mov.toFixed(1)}`;
+    `foco ${m.nitidez.toFixed(1)}/${objFoco.toFixed(1)}` +
+    ` · mov ${isFinite(m.mov) ? m.mov.toFixed(1) : '—'}/${objMov.toFixed(1)}`;
   $('#estadofoco').textContent =
       muestras <= CALENTAMIENTO ? 'calibrando…'
     : !quieto ? 'mantén la cámara quieta'
@@ -533,7 +553,7 @@ function tick() {
 }
 
 function arrancarMedidor() {
-  previo = null; mejor = 0; seguidas = 0; muestras = 0;
+  previo = null; mejor = 0; seguidas = 0; muestras = 0; ruido = Infinity;
   clearInterval(temporizador);
   temporizador = setInterval(tick, MUESTREO_MS);
 }
