@@ -62,6 +62,32 @@ Todo lo inyecta AMP al desplegar. Estas variables solo se tocan en local:
 | `AMP_LLM_OPENAI_PATH` | Sufijo de path, solo si el upstream es un host pelado |
 | `AMP_LLM_GATEWAY_AUTHORITY` | Fuerza una autoridad concreta |
 
+## cliente.py — probarlo desde fuera
+
+Cliente sin dependencias (solo librería estándar de Python 3) que llama al
+agente **atravesando el gateway**, como lo haría cualquier consumidor externo.
+Es la forma de demostrar que el agente es alcanzable de verdad, sin túneles.
+
+```bash
+export OCR_AGENT_URL="http://default-default.am-gateway.localhost:19080/ocr-agent-ocr-agent-endpoint"
+export OCR_AGENT_API_KEY="la-clave-del-agente"   # se crea en la consola
+
+./cliente.py ticket_ok.png       # informe formateado
+./cliente.py ticket_mal.png      # el descuadre, marcado en rojo
+./cliente.py foto.jpg --json     # la respuesta cruda
+```
+
+Contra el pod directamente, saltándose el gateway (útil para aislar fallos):
+
+```bash
+kubectl port-forward -n dp-default-telxius-default-279c0255 pod/<pod> 8188:8080 &
+./cliente.py ticket_ok.png --url http://127.0.0.1:8188
+```
+
+Sin `--api-key` contra el gateway devuelve `401 Valid API key required`, que es
+en sí mismo parte de la demostración: el modelo es local y gratuito, pero el
+gateway exige credencial igualmente.
+
 ## Probarlo en local
 
 ```bash
