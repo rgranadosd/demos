@@ -72,6 +72,16 @@ Tres formas de enviar un justificante: arrastrarlo, pegarlo del portapapeles,
 o **hacerle una foto con la cámara**. Sale la ficha del gasto: campos, líneas,
 comprobaciones aritméticas y advertencias.
 
+Si ves la imagen invertida, pulsa **⇋ Espejo**: voltea la vista previa *y* la
+captura a la vez, así que lo que ves es siempre lo que se envía. La preferencia
+se recuerda, porque depende de la cámara y no del momento.
+
+Importa más de lo que parece. Con un ticket espejado el modelo **no** avisa de
+que no lo lee: devuelve `legible: true` y se inventa los importes (en una
+prueba, 55,50 € donde ponía 61,49). Lo único que lo delató fue la comprobación
+aritmética. Es la mejor defensa del diseño: verificar en código lo que el
+modelo no va a confesar.
+
 La cámara pide la resolución más alta disponible (1920×1080 si la hay): un
 ticket tiene letra pequeña y a 640×480 el modelo no lee los importes. La
 captura se envía sola, sin un clic extra, y el piloto de la cámara se apaga al

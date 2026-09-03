@@ -93,6 +93,9 @@
           border-radius:14px;overflow:hidden;background:#000;position:relative;display:none}
   .camara.abierta{display:block}
   .camara video{width:100%;max-height:46vh;object-fit:contain;display:block}
+  .camara video.espejo{transform:scaleX(-1)}
+  button.sec.activo{color:var(--acento);border-color:var(--acento);
+                    background:rgba(255,122,69,.09)}
   .camara .guia{position:absolute;inset:8% 18%;border:2px dashed rgba(255,255,255,.35);
                 border-radius:10px;pointer-events:none}
   .camara .mandos{display:flex;gap:10px;justify-content:center;padding:12px;
@@ -144,9 +147,10 @@
   <div class="camara" id="camara">
     <video id="video" playsinline autoplay muted></video>
     <div class="guia"></div>
-    <div class="pista">Encuadra el ticket dentro del marco y que se lea bien</div>
+    <div class="pista">Encuadra el ticket en el marco. Si lo ves invertido, pulsa Espejo</div>
     <div class="mandos">
       <button id="capturar">Capturar y analizar</button>
+      <button class="sec" id="espejo" title="Voltea la imagen en horizontal">⇋ Espejo</button>
       <button class="sec" id="cerrarcam">Cancelar</button>
     </div>
   </div>
@@ -305,6 +309,19 @@ boton.onclick = enviar;
 const panel = $('#camara'), video = $('#video');
 let flujo = null;
 
+/* Algunas cámaras (y macOS con Continuity Camera) entregan el flujo ya
+   espejado. Eso no es solo incómodo al encuadrar: si se captura tal cual, el
+   texto del ticket va invertido y el modelo no lo lee. El interruptor voltea
+   la vista previa Y la captura a la vez, así que lo que se ve es siempre
+   exactamente lo que se envía. Se recuerda entre sesiones porque depende de la
+   cámara, no del momento. */
+let espejo = localStorage.getItem('ocr_espejo') === '1';
+
+function pintarEspejo() {
+  video.classList.toggle('espejo', espejo);
+  $('#espejo').classList.toggle('activo', espejo);
+}
+
 async function abrirCamara() {
   try {
     flujo = await navigator.mediaDevices.getUserMedia({
@@ -326,6 +343,7 @@ async function abrirCamara() {
     return;
   }
   video.srcObject = flujo;
+  pintarEspejo();
   panel.classList.add('abierta');
   $('#abrircam').disabled = true;
 }
@@ -343,7 +361,15 @@ function capturar() {
   const lienzo = document.createElement('canvas');
   lienzo.width  = video.videoWidth;
   lienzo.height = video.videoHeight;
-  lienzo.getContext('2d').drawImage(video, 0, 0);
+  const ctx = lienzo.getContext('2d');
+  if (espejo) {
+    // El canvas dibuja el fotograma crudo: el volteo CSS de la vista previa no
+    // le afecta. Hay que repetirlo aquí o la foto saldría al revés de como se
+    // veía en pantalla.
+    ctx.translate(lienzo.width, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(video, 0, 0);
   // JPEG con calidad alta: un PNG de 1920×1080 son varios MB y solo añade
   // tiempo de subida sin mejorar lo que el modelo es capaz de leer.
   lienzo.toBlob(b => {
@@ -355,6 +381,11 @@ function capturar() {
   }, 'image/jpeg', 0.92);
 }
 
+$('#espejo').onclick = () => {
+  espejo = !espejo;
+  localStorage.setItem('ocr_espejo', espejo ? '1' : '0');
+  pintarEspejo();
+};
 $('#abrircam').onclick  = abrirCamara;
 $('#cerrarcam').onclick = cerrarCamara;
 $('#capturar').onclick  = capturar;
