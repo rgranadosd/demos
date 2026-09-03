@@ -72,9 +72,9 @@ Tres formas de enviar un justificante: arrastrarlo, pegarlo del portapapeles,
 o **hacerle una foto con la cámara**. Sale la ficha del gasto: campos, líneas,
 comprobaciones aritméticas y advertencias.
 
-Si ves la imagen invertida, pulsa **⇋ Espejo**: voltea la vista previa *y* la
-captura a la vez, así que lo que ves es siempre lo que se envía. La preferencia
-se recuerda, porque depende de la cámara y no del momento.
+La imagen se voltea **siempre**, sin interruptor: la vista previa para poder
+encuadrar sin confundirse, y la captura porque la cámara entrega el flujo
+espejado.
 
 Importa más de lo que parece. Con un ticket espejado el modelo **no** avisa de
 que no lo lee: devuelve `legible: true` y se inventa los importes (en una
@@ -84,11 +84,12 @@ modelo no va a confesar.
 
 ### Captura automática
 
-Con **⏱ Auto** activado (por defecto) no hace falta pulsar nada: la cámara mide
+No hace falta pulsar nada: la cámara mide
 cada 200 ms la nitidez y el movimiento, y dispara sola cuando la imagen lleva
 unos 0,8 s enfocada y quieta. La barra de abajo muestra el nivel y el estado
 (`calibrando`, `mantén la cámara quieta`, `acércate o busca el enfoque`,
-`enfocado — capturando en 2…`).
+`enfocado — capturando en 2…`). El botón **Capturar y analizar** sigue ahí y
+pasa por delante: dispara al momento y corta el automático.
 
 La nitidez es el laplaciano medio, que se desploma al desenfocar: sobre un
 ticket real, 13,4 nítido frente a 2,9 con 1 px de desenfoque. El umbral es

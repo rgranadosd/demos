@@ -94,8 +94,6 @@
   .camara.abierta{display:block}
   .camara video{width:100%;max-height:46vh;object-fit:contain;display:block}
   .camara video.espejo{transform:scaleX(-1)}
-  button.sec.activo{color:var(--acento);border-color:var(--acento);
-                    background:rgba(255,122,69,.09)}
   button.reintentar{padding:8px 14px;font-size:12.5px;border-radius:8px}
   .medidor{position:absolute;left:0;right:0;bottom:0;padding:10px 14px;
            background:linear-gradient(transparent,rgba(0,0,0,.75));pointer-events:none}
@@ -157,7 +155,7 @@
   <div class="camara" id="camara">
     <video id="video" playsinline autoplay muted></video>
     <div class="guia"></div>
-    <div class="pista">Encuadra el ticket en el marco. Si lo ves invertido, pulsa Espejo</div>
+    <div class="pista">Encuadra el ticket en el marco: se captura solo al enfocar</div>
     <div class="medidor">
       <div class="txt"><span id="estadofoco">preparando…</span>
                        <span class="num" id="numfoco"></span></div>
@@ -165,8 +163,6 @@
     </div>
     <div class="mandos">
       <button id="capturar">Capturar y analizar</button>
-      <button class="sec" id="auto" title="Captura sola cuando la imagen está enfocada y quieta">⏱ Auto</button>
-      <button class="sec" id="espejo" title="Voltea la imagen en horizontal">⇋ Espejo</button>
       <button class="sec" id="cerrarcam">Cancelar</button>
     </div>
   </div>
@@ -375,18 +371,14 @@ boton.onclick = enviar;
 const panel = $('#camara'), video = $('#video');
 let flujo = null;
 
-/* Algunas cámaras (y macOS con Continuity Camera) entregan el flujo ya
-   espejado. Eso no es solo incómodo al encuadrar: si se captura tal cual, el
-   texto del ticket va invertido y el modelo no lo lee. El interruptor voltea
-   la vista previa Y la captura a la vez, así que lo que se ve es siempre
-   exactamente lo que se envía. Se recuerda entre sesiones porque depende de la
-   cámara, no del momento. */
-let espejo = localStorage.getItem('ocr_espejo') === '1';
+/* La cámara entrega el flujo espejado, así que se voltea SIEMPRE: la vista
+   previa para poder encuadrar sin confundirse, y la captura porque un ticket
+   con el texto invertido no lo lee el modelo — y no falla avisando, se inventa
+   los importes (probado: 55,50 donde ponía 61,49).
 
-function pintarEspejo() {
-  video.classList.toggle('espejo', espejo);
-  $('#espejo').classList.toggle('activo', espejo);
-}
+   El canvas dibuja el fotograma crudo y no hereda el `transform` de CSS, por
+   eso el volteo hay que repetirlo allí. */
+const ESPEJO = true;
 
 async function abrirCamara() {
   try {
@@ -409,8 +401,7 @@ async function abrirCamara() {
     return;
   }
   video.srcObject = flujo;
-  pintarEspejo();
-  pintarAuto();
+  video.classList.toggle('espejo', ESPEJO);
   panel.classList.add('abierta');
   video.onloadedmetadata = arrancarMedidor;
   $('#abrircam').disabled = true;
@@ -432,7 +423,7 @@ function capturar() {
   lienzo.width  = video.videoWidth;
   lienzo.height = video.videoHeight;
   const ctx = lienzo.getContext('2d');
-  if (espejo) {
+  if (ESPEJO) {
     // El canvas dibuja el fotograma crudo: el volteo CSS de la vista previa no
     // le afecta. Hay que repetirlo aquí o la foto saldría al revés de como se
     // veía en pantalla.
@@ -471,7 +462,7 @@ const FRACCION_MEJOR= 0.65;  // hay que llegar al 65% del mejor enfoque visto
 const ESTABLES      = 4;     // ~0,8 s seguidos en verde antes de disparar
 const CALENTAMIENTO = 8;     // muestras antes de permitir un disparo
 
-let auto = localStorage.getItem('ocr_auto') !== '0';
+const AUTO = true;   // el disparo automático es el modo normal
 let temporizador = null, previo = null, mejor = 0, seguidas = 0, muestras = 0;
 const lienzoMuestra = document.createElement('canvas');
 
@@ -532,13 +523,13 @@ function tick() {
   $('#barrafoco').classList.toggle('listo', listo);
   $('#numfoco').textContent =
     `nitidez ${m.nitidez.toFixed(1)} · mov ${m.mov === Infinity ? '—' : m.mov.toFixed(1)}`;
-  $('#estadofoco').textContent = !auto ? 'automático desactivado'
-    : muestras <= CALENTAMIENTO ? 'calibrando…'
+  $('#estadofoco').textContent =
+      muestras <= CALENTAMIENTO ? 'calibrando…'
     : !quieto ? 'mantén la cámara quieta'
     : !enfocado ? 'acércate o busca el enfoque'
     : `enfocado — capturando en ${Math.max(0, ESTABLES - seguidas)}…`;
 
-  if (auto && seguidas >= ESTABLES) capturar();
+  if (AUTO && seguidas >= ESTABLES) capturar();
 }
 
 function arrancarMedidor() {
@@ -552,19 +543,6 @@ function pararMedidor() {
   temporizador = null;
 }
 
-function pintarAuto() { $('#auto').classList.toggle('activo', auto); }
-
-$('#auto').onclick = () => {
-  auto = !auto;
-  localStorage.setItem('ocr_auto', auto ? '1' : '0');
-  pintarAuto();
-};
-
-$('#espejo').onclick = () => {
-  espejo = !espejo;
-  localStorage.setItem('ocr_espejo', espejo ? '1' : '0');
-  pintarEspejo();
-};
 $('#abrircam').onclick  = abrirCamara;
 $('#cerrarcam').onclick = cerrarCamara;
 $('#capturar').onclick  = capturar;
