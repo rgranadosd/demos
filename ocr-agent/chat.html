@@ -127,9 +127,14 @@
   .barra-foco i{display:block;height:100%;width:0;background:var(--aviso);
                 transition:width .15s linear,background .2s}
   .barra-foco.listo i{background:var(--ok)}
+  /* El marco cambia de color con el estado, para no tener que mirar la barra de
+     abajo mientras se sostiene el ticket delante de la cámara. */
   .visor .guia{position:absolute;left:18%;top:8%;width:64%;height:84%;
                border:2px dashed rgba(255,255,255,.4);border-radius:10px;
-               pointer-events:none}
+               pointer-events:none;transition:border-color .2s,box-shadow .2s}
+  .visor .guia.detectado{border-color:var(--aviso)}
+  .visor .guia.listo{border-color:var(--ok);border-style:solid;
+                     box-shadow:0 0 0 9999px rgba(63,185,80,.08)}
   .camara .mandos{display:flex;gap:10px;justify-content:center;padding:12px;
                   background:var(--panel);border-top:1px solid var(--borde)}
   .visor .pista{position:absolute;top:10px;left:0;right:0;text-align:center;
@@ -179,7 +184,7 @@
   <div class="camara" id="camara">
     <div class="visor">
       <video id="video" playsinline autoplay muted></video>
-      <div class="guia"></div>
+      <div class="guia" id="guia"></div>
       <div class="pista">Encuadra el ticket en el marco: se captura solo al enfocar</div>
       <div class="medidor">
         <div class="txt"><span id="estadofoco">preparando…</span>
@@ -446,6 +451,7 @@ async function abrirCamara() {
 
 function cerrarCamara() {
   pararMedidor();
+  $('#guia').classList.remove('detectado', 'listo');
   if (flujo) flujo.getTracks().forEach(t => t.stop());   // apaga el piloto
   flujo = null;
   video.srcObject = null;
@@ -620,6 +626,9 @@ function tick() {
                        : Math.round(100 * m.claros / CLAROS_MIN);
   $('#barrafoco').firstElementChild.style.width = Math.min(100, pct) + '%';
   $('#barrafoco').classList.toggle('listo', listo);
+  // Mismo semáforo en el marco: blanco sin papel, ámbar detectado, verde listo.
+  $('#guia').classList.toggle('detectado', hayPapel && !listo);
+  $('#guia').classList.toggle('listo', listo);
   // Actual/exigido en las tres condiciones: si no dispara, se ve cuál falla.
   $('#numfoco').textContent =
     `papel ${(m.claros * 100).toFixed(0)}/${(CLAROS_MIN * 100).toFixed(0)}%` +
