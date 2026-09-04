@@ -423,6 +423,45 @@ sería peor que no saber quién actuó.
 ejecución local, donde el endpoint de ThunderID no resuelve desde fuera del
 clúster.
 
+#### El agente no puede llegar a ThunderID por la vía directa
+
+`AMP_AGENTID_TOKEN_ENDPOINT` apunta al servicio de ThunderID en el 8090, pero el
+pod corre en un **sandbox** cuya NetworkPolicy de egress solo permite:
+
+```
+DNS (53)                 -> cualquier destino
+todos los puertos        -> ns openchoreo-data-plane
+TCP/22893                -> ns del API platform gateway
+TCP/80 y TCP/443         -> 0.0.0.0/0
+```
+
+ThunderID vive en `amp-thunder-default-default` en el **8090**, que no encaja en
+ninguna. El DNS resuelve y el TCP se rechaza. AMP le da al agente credenciales
+para un sitio al que su propia política le impide llegar.
+
+Parchear la NetworkPolicy no vale: lleva un timestamp en el nombre
+(`ocr-agent-2026-09-04t12-45-03z-…`) y AMP la recrea en cada despliegue.
+
+La solución es publicar el endpoint de token **por el gateway que sí está
+permitido**, con el mismo patrón que ya usa el agente para alcanzar el colector
+de OpenTelemetry ([api-platform-default-default-otel-restapi]):
+
+```bash
+kubectl apply -f deploy/thunder-agentid-restapi.yaml
+```
+
+Y en el componente de AMP:
+
+```
+AGENTID_TOKEN_ENDPOINT=http://api-platform-default-default-gateway-gateway-runtime.default-default:22893/thunder/oauth2/token
+```
+
+Esa variable tiene precedencia sobre la que inyecta AMP, igual que `AMP_LLM_URL`
+la tiene en `llm_binding`. Cuando está puesta, la clave de agente
+(`AMP_AGENT_API_KEY`) viaja en la cabecera `x-amp-api-key` que espera el
+gateway, dejando `Authorization` libre para el `client_secret_basic` que
+ThunderID necesita.
+
 ### Errores
 
 Todo fallo no recuperable deja las tres cosas a la vez — excepción registrada,

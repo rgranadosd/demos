@@ -72,11 +72,25 @@ SIN_IDENTIDAD = IdentidadAgente(None, None, None, ORIGEN_API_KEY)
 
 
 def _config() -> Dict[str, str]:
+    """Credenciales del agente y por donde alcanzar a ThunderID.
+
+    `AGENTID_TOKEN_ENDPOINT` tiene precedencia sobre la que inyecta AMP, igual
+    que `AMP_LLM_URL` la tiene en `llm_binding`. Hace falta porque la
+    NetworkPolicy del sandbox no deja salir al 8090 de ThunderID: solo DNS, el
+    data plane, el 22893 del gateway y 80/443. Con la variable se apunta a la
+    ruta publicada en ese gateway, que si esta permitida.
+    """
+    directo = os.getenv("AMP_AGENTID_TOKEN_ENDPOINT", "").strip()
+    via_gateway = os.getenv("AGENTID_TOKEN_ENDPOINT", "").strip()
     return {
         "client_id": os.getenv("AMP_AGENTID_CLIENT_ID", "").strip(),
         "client_secret": os.getenv("AMP_AGENTID_CLIENT_SECRET", "").strip(),
-        "token_endpoint": os.getenv("AMP_AGENTID_TOKEN_ENDPOINT", "").strip(),
+        "token_endpoint": via_gateway or directo,
         "scopes": os.getenv("AMP_AGENTID_SCOPES", "").strip(),
+        # El gateway autentica al consumidor con la clave de agente en su
+        # propia cabecera, dejando Authorization libre para el
+        # client_secret_basic que espera ThunderID.
+        "gateway_key": os.getenv("AMP_AGENT_API_KEY", "").strip() if via_gateway else "",
     }
 
 
@@ -124,12 +138,14 @@ class ProveedorIdentidad:
         datos = {"grant_type": "client_credentials"}
         if cfg["scopes"]:
             datos["scope"] = cfg["scopes"]
+        cabeceras = {"x-amp-api-key": cfg["gateway_key"]} if cfg["gateway_key"] else None
 
         try:
             respuesta = httpx.post(
                 cfg["token_endpoint"],
                 data=datos,
                 auth=(cfg["client_id"], cfg["client_secret"]),
+                headers=cabeceras,
                 timeout=_TIEMPO_ESPERA,
             )
             respuesta.raise_for_status()
@@ -159,13 +175,15 @@ class ProveedorIdentidad:
 def _sin_secretos(exc: BaseException) -> str:
     """Recorta el mensaje a host y motivo: las URLs internas llevan namespace."""
     texto = str(exc)
-    try:
-        endpoint = os.getenv("AMP_AGENTID_TOKEN_ENDPOINT", "")
-        host = urlsplit(endpoint).hostname
-        if host:
-            texto = texto.replace(endpoint, host)
-    except Exception:  # pragma: no cover
-        pass
+    for var in ("AGENTID_TOKEN_ENDPOINT", "AMP_AGENTID_TOKEN_ENDPOINT"):
+        endpoint = os.getenv(var, "")
+        if not endpoint:
+            continue
+        try:
+            host = urlsplit(endpoint).hostname
+        except Exception:  # pragma: no cover
+            host = None
+        texto = texto.replace(endpoint, host or "[endpoint]")
     return f"{type(exc).__name__}: {texto[:200]}"
 
 

@@ -32,7 +32,8 @@ def entorno(monkeypatch):
     monkeypatch.setenv("AMP_AGENTID_CLIENT_ID", CLIENT_ID)
     monkeypatch.setenv("AMP_AGENTID_CLIENT_SECRET", "un-secreto")
     monkeypatch.setenv("AMP_AGENTID_TOKEN_ENDPOINT", ENDPOINT)
-    monkeypatch.delenv("AMP_AGENTID_SCOPES", raising=False)
+    for var in ("AMP_AGENTID_SCOPES", "AGENTID_TOKEN_ENDPOINT", "AMP_AGENT_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
     ai.reiniciar_cache()
     yield
     ai.reiniciar_cache()
@@ -41,7 +42,14 @@ def entorno(monkeypatch):
 def _responde(monkeypatch, cuerpo, status=200, llamadas=None):
     def _post(url, **kwargs):
         if llamadas is not None:
-            llamadas.append((url, kwargs.get("auth"), (kwargs.get("data") or {}).get("scope")))
+            llamadas.append(
+                {
+                    "url": url,
+                    "auth": kwargs.get("auth"),
+                    "scope": (kwargs.get("data") or {}).get("scope"),
+                    "headers": kwargs.get("headers"),
+                }
+            )
         peticion = httpx.Request("POST", url)
         return httpx.Response(status, json=cuerpo, request=peticion)
 
@@ -62,7 +70,10 @@ def test_identidad_resuelta_desde_el_token(monkeypatch):
     assert ident.agent_id == AGENT_ID
     assert ident.issuer == ISSUER
     assert ident.origen == "agent_token"
-    assert llamadas[0][1] == (CLIENT_ID, "un-secreto")
+    assert llamadas[0]["auth"] == (CLIENT_ID, "un-secreto")
+    assert llamadas[0]["url"] == ENDPOINT
+    # Sin ruta por gateway no se manda la clave de agente a ThunderID.
+    assert llamadas[0]["headers"] is None
 
     attrs = ident.atributos()
     assert attrs["gen_ai.agent.id"] == AGENT_ID
@@ -97,12 +108,51 @@ def test_scopes_se_piden_solo_si_los_hay(monkeypatch):
         llamadas=llamadas,
     )
     ai.identidad_agente()
-    assert llamadas[0][2] is None, "AMP_AGENTID_SCOPES vacio no debe mandarse"
+    assert llamadas[0]["scope"] is None, "AMP_AGENTID_SCOPES vacio no debe mandarse"
 
     monkeypatch.setenv("AMP_AGENTID_SCOPES", "expense:read")
     ai.reiniciar_cache()
     ai.identidad_agente()
-    assert llamadas[1][2] == "expense:read"
+    assert llamadas[1]["scope"] == "expense:read"
+
+
+def test_ruta_por_el_gateway_tiene_precedencia(monkeypatch):
+    """La NetworkPolicy del sandbox no deja llegar al 8090 de ThunderID.
+
+    Con `AGENTID_TOKEN_ENDPOINT` se sale por el 22893, que si esta permitido, y
+    la clave de agente viaja en x-amp-api-key para no pisar el Authorization
+    que ThunderID necesita.
+    """
+    gateway = "http://api-platform-gateway.default-default:22893/thunder/oauth2/token"
+    monkeypatch.setenv("AGENTID_TOKEN_ENDPOINT", gateway)
+    monkeypatch.setenv("AMP_AGENT_API_KEY", "clave-de-agente")
+    ai.reiniciar_cache()
+
+    llamadas = []
+    _responde(
+        monkeypatch,
+        {"access_token": _jwt({"sub": AGENT_ID, "iss": ISSUER}), "expires_in": 3600},
+        llamadas=llamadas,
+    )
+
+    ident = ai.identidad_agente()
+
+    assert ident.agent_id == AGENT_ID
+    assert llamadas[0]["url"] == gateway, "debe ganar sobre AMP_AGENTID_TOKEN_ENDPOINT"
+    assert llamadas[0]["headers"] == {"x-amp-api-key": "clave-de-agente"}
+    # Authorization sigue llevando el client_secret_basic del agente.
+    assert llamadas[0]["auth"] == (CLIENT_ID, "un-secreto")
+
+
+def test_la_clave_de_agente_no_sale_si_no_hay_gateway(monkeypatch):
+    monkeypatch.setenv("AMP_AGENT_API_KEY", "clave-de-agente")
+    ai.reiniciar_cache()
+    llamadas = []
+    _responde(monkeypatch, {"access_token": _jwt({"sub": AGENT_ID}), "expires_in": 60}, llamadas=llamadas)
+
+    ai.identidad_agente()
+
+    assert llamadas[0]["headers"] is None
 
 
 def test_thunder_caido_no_tumba_el_agente(monkeypatch):
