@@ -399,7 +399,8 @@ async function enviar(fichero, origen) {
   espera.scrollIntoView({behavior: 'smooth', block: 'end'});
 }
 
-boton.onclick = enviar;
+// Sin envolver, el PointerEvent del clic llegaria como `fichero`.
+boton.onclick = () => enviar();
 
 /* ─── webcam ────────────────────────────────────────────────────────────────
    getUserMedia exige contexto seguro, pero los navegadores tratan

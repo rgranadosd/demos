@@ -1,0 +1,42 @@
+# Publica el endpoint de token de ThunderID en el gateway del API platform.
+#
+# El pod del agente corre en un sandbox cuya NetworkPolicy de egress solo
+# permite DNS, el data plane, TCP/22893 hacia este gateway, y 80/443. ThunderID
+# vive en otro namespace en el 8090, asi que el agente no puede llegar a su
+# propio proveedor de identidad aunque AMP le inyecte las credenciales.
+#
+# En vez de parchear la NetworkPolicy -- que AMP recrea en cada despliegue,
+# porque lleva un timestamp en el nombre -- se publica Thunder por el camino que
+# ya esta permitido. Es el mismo patron con el que el agente alcanza el colector
+# de OpenTelemetry: ver api-platform-default-default-otel-restapi.
+#
+# La politica jwt-auth es identica a la de esa API: la credencial viaja en
+# x-amp-api-key, no en Authorization, que queda libre para el client_secret_basic
+# que ThunderID espera.
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: RestApi
+metadata:
+  name: amp-thunder-default-default-agentid-restapi
+  namespace: default-default
+  labels:
+    # El APIGateway selecciona sus RestApi por esta etiqueta; sin ella queda en
+    # GatewayNotReady.
+    gateway.api-platform.wso2.com/restapi-target: api-platform-default-default
+spec:
+  context: /thunder
+  displayName: amp-thunder-default-default-agentid
+  version: v1.0
+  operations:
+    - method: POST
+      path: /oauth2/token
+  policies:
+    - name: jwt-auth
+      version: v1
+      params:
+        headerName: x-amp-api-key
+        authHeaderPrefix: ""
+        issuers:
+          - agent-manager-service
+  upstream:
+    main:
+      url: http://amp-thunder-default-default-service.amp-thunder-default-default.svc.cluster.local:8090
