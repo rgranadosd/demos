@@ -91,6 +91,18 @@ unos 0,8 s enfocada y quieta. La barra de abajo muestra el nivel y el estado
 `enfocado — capturando en 2…`). El botón **Capturar y analizar** sigue ahí y
 pasa por delante: dispara al momento y corta el automático.
 
+Antes de mirar el enfoque comprueba que **hay un ticket delante**, midiendo
+solo dentro del marco guía. Un ticket es lo único que es *claro* **y** tiene
+*detalle* a la vez: medido sobre escenas sintéticas, ticket 53% de superficie
+clara y 8,95 de detalle, mesa blanca vacía 100% y 0,17, habitación con objetos
+0% y 3,20, escena oscura 0% y 0,00. Ninguna métrica sola distingue; las dos
+juntas, sí.
+
+Esto importa porque sin ello el disparador saltaba a los dos segundos de abrir
+la cámara: una habitación enfocada y quieta cumple «nítido y quieto» a la
+perfección. Además el calibrado del enfoque solo corre mientras hay papel, o la
+escena vacía fijaría el listón antes de que llegue el documento.
+
 La nitidez es el laplaciano medio, que se desploma al desenfocar: sobre un
 ticket real, 13,4 nítido frente a 2,9 con 1 px de desenfoque. El umbral es
 **relativo** al mejor enfoque visto desde que se abrió la cámara, no un número

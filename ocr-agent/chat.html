@@ -459,10 +459,19 @@ function capturar() {
    lisa, donde todo está "igual de enfocado" porque no hay nada que enfocar. */
 const MUESTREO_MS   = 200;
 const ANCHO_MUESTRA = 320;
+// Solo se mira DENTRO del marco guía, que es donde se pide poner el ticket.
+// Medir el fotograma entero hacía que la habitación de fondo contara.
+const MARCO = {x: 0.18, y: 0.08, w: 0.64, h: 0.84};   // igual que el .guia del CSS
+// Un ticket es lo único que es claro Y tiene detalle a la vez. Medido sobre
+// escenas sintéticas: ticket 53% claros / 8,95 detalle · mesa blanca vacía
+// 100% / 0,17 · habitación con objetos 0% / 3,20 · escena oscura 0% / 0,00.
+// Ninguna métrica sola distingue; las dos juntas, sí.
+const CLAROS_MIN    = 0.25;  // al menos un cuarto del marco es superficie clara
+const UMBRAL_CLARO  = 170;   // nivel de gris a partir del cual cuenta como claro
 const NITIDEZ_MIN   = 2.5;   // suelo absoluto: evita disparar sobre una pared
 const FRACCION_MEJOR= 0.65;  // hay que llegar al 65% del mejor enfoque visto
 const ESTABLES      = 4;     // ~0,8 s seguidos en verde antes de disparar
-const CALENTAMIENTO = 8;     // muestras antes de permitir un disparo
+const CALENTAMIENTO = 6;     // muestras CON papel antes de permitir disparo
 // El movimiento tampoco puede compararse contra un número fijo: el ruido del
 // sensor de una webcam ya produce diferencias de varios niveles entre
 // fotogramas consecutivos, y con poca luz mucho más. Un 3,5 fijo hacía que
@@ -477,13 +486,18 @@ const MOV_SUELO     = 1.0;   // por debajo de esto siempre cuenta como quieto
 const MOV_TECHO     = 12;
 
 const AUTO = true;   // el disparo automático es el modo normal
-let temporizador = null, previo = null, mejor = 0, seguidas = 0, muestras = 0;
+let temporizador = null, previo = null, mejor = 0, seguidas = 0, conPapel = 0;
 let ruido = Infinity;   // suelo de movimiento observado en esta cámara
 const lienzoMuestra = document.createElement('canvas');
 
 function grises(w, h) {
+  // Se recorta el marco del vídeo original y se escala a w×h.
   const ctx = lienzoMuestra.getContext('2d', {willReadFrequently: true});
-  ctx.drawImage(video, 0, 0, w, h);
+  const vw = video.videoWidth, vh = video.videoHeight;
+  ctx.drawImage(video,
+    Math.round(vw * MARCO.x), Math.round(vh * MARCO.y),
+    Math.round(vw * MARCO.w), Math.round(vh * MARCO.h),
+    0, 0, w, h);
   const d = ctx.getImageData(0, 0, w, h).data;
   const g = new Float32Array(w * h);
   for (let i = 0, p = 0; i < d.length; i += 4, p++)
@@ -507,6 +521,10 @@ function medir() {
     }
   const nitidez = suma / n;
 
+  let claros = 0;
+  for (let i = 0; i < g.length; i++) if (g[i] > UMBRAL_CLARO) claros++;
+  claros /= g.length;
+
   let mov = 0;
   if (previo && previo.length === g.length) {
     let s = 0;
@@ -516,44 +534,56 @@ function medir() {
     mov = Infinity;   // primer fotograma: no hay con qué comparar
   }
   previo = g;
-  return {nitidez, mov};
+  return {nitidez, mov, claros};
 }
 
 function tick() {
   const m = medir();
   if (!m) return;
-  muestras++;
-  // Ambos límites decaen despacio para readaptarse si cambia la luz o la escena.
-  mejor = Math.max(m.nitidez, mejor * 0.995);
+  const hayPapel = m.claros >= CLAROS_MIN;
+
+  // El calibrado del enfoque SOLO corre cuando hay papel delante. Antes se
+  // calibraba con la escena vacía, así que una habitación enfocada fijaba el
+  // listón y el disparador saltaba a los dos segundos de abrir la cámara, sin
+  // que nadie hubiera puesto nada.
+  if (hayPapel) {
+    conPapel++;
+    mejor = Math.max(m.nitidez, mejor * 0.995);
+  } else {
+    conPapel = 0;
+    mejor = 0;
+  }
   if (isFinite(m.mov)) ruido = Math.min(m.mov, ruido * 1.005);
 
   const objFoco = Math.max(NITIDEZ_MIN, mejor * FRACCION_MEJOR);
   const objMov  = Math.min(MOV_TECHO, Math.max(MOV_SUELO, ruido * MOV_HOLGURA));
   const quieto   = m.mov <= objMov;
-  const enfocado = m.nitidez >= objFoco;
-  const listo    = quieto && enfocado && muestras > CALENTAMIENTO;
+  const enfocado = hayPapel && m.nitidez >= objFoco;
+  const listo    = hayPapel && quieto && enfocado && conPapel > CALENTAMIENTO;
 
   seguidas = listo ? seguidas + 1 : 0;
 
-  const pct = Math.min(100, Math.round(100 * m.nitidez / (mejor || 1)));
-  $('#barrafoco').firstElementChild.style.width = pct + '%';
+  const pct = hayPapel ? Math.min(100, Math.round(100 * m.nitidez / (mejor || 1)))
+                       : Math.round(100 * m.claros / CLAROS_MIN);
+  $('#barrafoco').firstElementChild.style.width = Math.min(100, pct) + '%';
   $('#barrafoco').classList.toggle('listo', listo);
-  // Se muestra actual/exigido en ambos: si no dispara, se ve en el acto cuál
-  // de las dos condiciones falla.
+  // Actual/exigido en las tres condiciones: si no dispara, se ve cuál falla.
   $('#numfoco').textContent =
-    `foco ${m.nitidez.toFixed(1)}/${objFoco.toFixed(1)}` +
+    `papel ${(m.claros * 100).toFixed(0)}/${(CLAROS_MIN * 100).toFixed(0)}%` +
+    ` · foco ${m.nitidez.toFixed(1)}/${objFoco.toFixed(1)}` +
     ` · mov ${isFinite(m.mov) ? m.mov.toFixed(1) : '—'}/${objMov.toFixed(1)}`;
   $('#estadofoco').textContent =
-      muestras <= CALENTAMIENTO ? 'calibrando…'
+      !hayPapel ? 'acerca el ticket al marco'
+    : conPapel <= CALENTAMIENTO ? 'ticket detectado, ajustando…'
     : !quieto ? 'mantén la cámara quieta'
-    : !enfocado ? 'acércate o busca el enfoque'
+    : !enfocado ? 'el ticket está borroso — acércate o aléjate'
     : `enfocado — capturando en ${Math.max(0, ESTABLES - seguidas)}…`;
 
   if (AUTO && seguidas >= ESTABLES) capturar();
 }
 
 function arrancarMedidor() {
-  previo = null; mejor = 0; seguidas = 0; muestras = 0; ruido = Infinity;
+  previo = null; mejor = 0; seguidas = 0; conPapel = 0; ruido = Infinity;
   clearInterval(temporizador);
   temporizador = setInterval(tick, MUESTREO_MS);
 }
