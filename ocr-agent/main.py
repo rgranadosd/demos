@@ -43,6 +43,7 @@ import agent_identity
 import esquema
 import llm_binding
 import observabilidad as obs
+import user_identity
 
 logger = logging.getLogger("ocr-agent")
 logging.basicConfig(
@@ -799,6 +800,10 @@ def _analizar_justificante(contenido: bytes, mime_type: str,
     origen_norm = _origen_normalizado(origen)
     inicio = time.monotonic()
 
+    # Antes de abrir el span: un token falsificado no merece traza de analisis,
+    # merece un 401.
+    usuario = user_identity.identidad_usuario(cabeceras)
+
     atributos = {
         "gen_ai.operation.name": "invoke_agent",
         "gen_ai.system": os.getenv("AMP_GENAI_SYSTEM", "openai"),
@@ -818,6 +823,8 @@ def _analizar_justificante(contenido: bytes, mime_type: str,
     }
     # Quién actúa, según ThunderID y no según una cadena escrita en el código.
     atributos.update(agent_identity.identidad_agente().atributos())
+    # Y por cuenta de quién, si la petición trae un token de usuario.
+    atributos.update(usuario.atributos())
 
     etiquetas = obs.etiquetas_base(mime_type=atributos["expense.document.mime_type"])
     obs.metricas().peticiones.add(1, etiquetas)
@@ -968,6 +975,9 @@ def _responder_analisis(contenido: bytes, mime_type: str, origen: str,
     """Traduce el resultado del agente a la respuesta HTTP, sin filtrar detalles."""
     try:
         return _analizar_justificante(contenido, mime_type, origen, dict(request.headers))
+    except user_identity.TokenDeUsuarioInvalido as exc:
+        logger.warning("token de usuario rechazado error.type=%s", exc.error_type)
+        raise HTTPException(status_code=401, detail=exc.motivo)
     except ErrorDocumento as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.mensaje)
     except HTTPException:

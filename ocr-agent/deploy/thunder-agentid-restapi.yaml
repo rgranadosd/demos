@@ -29,6 +29,10 @@ spec:
   operations:
     - method: POST
       path: /oauth2/token
+    # Las claves publicas para validar el token del usuario. Sin esto habria que
+    # creerse lo que diga el token, que es justo lo contrario de validarlo.
+    - method: GET
+      path: /oauth2/jwks
   policies:
     - name: jwt-auth
       version: v1

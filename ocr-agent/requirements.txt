@@ -4,3 +4,4 @@ openai>=1.60
 httpx>=0.27
 pydantic>=2.9
 python-multipart>=0.0.9
+pyjwt[crypto]>=2.8

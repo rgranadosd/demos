@@ -462,6 +462,43 @@ la tiene en `llm_binding`. Cuando está puesta, la clave de agente
 gateway, dejando `Authorization` libre para el `client_secret_basic` que
 ThunderID necesita.
 
+### Identidad del usuario
+
+Si la petición trae `Authorization: Bearer <token>`, el agente lo **valida
+contra las claves públicas de ThunderID** y publica en el span:
+
+| Atributo | Valor |
+|---|---|
+| `user.id` | el `sub` del token |
+| `auth.delegation` | `true` |
+| `auth.source` | `obo_token` |
+
+Con eso la traza responde *quién pidió el análisis*, no solo *qué agente lo
+ejecutó*.
+
+La firma se comprueba de verdad. Un `user.id` sacado de un token sin verificar
+no vale nada: cualquiera podría mandar un JWT inventado y atribuirle un gasto a
+otra persona. Por eso, **si llega un token y no es válido, la petición se
+rechaza con 401** en vez de ignorarlo en silencio. Los `error.type` posibles:
+`malformed_token`, `bad_signature`, `expired_token`, `wrong_issuer`,
+`incomplete_token`, `unknown_signing_key`, `jwks_unavailable`.
+
+Sin token, el análisis sigue como siempre: no toda petición viene de una
+persona, y eso no es un error.
+
+**Del token solo sale el `sub`.** Aunque venga `email`, `username` o `name`, no
+se publican: son PII y la traza no es sitio para ellos. El `sub` de ThunderID ya
+es un identificador opaco, así que no hace falta seudonimizarlo encima.
+
+Variables:
+
+| Variable | Para qué |
+|---|---|
+| `AGENTID_JWKS_URI` | De dónde bajar las claves. Por defecto se deriva de `AGENTID_TOKEN_ENDPOINT` cambiando `/oauth2/token` por `/oauth2/jwks` |
+| `AGENTID_ISSUER` | Emisor esperado. Sin ella no se comprueba el `iss`, que es un agujero: un token de otro IdP con firma válida pasaría |
+
+El JWKS se cachea una hora y se refresca solo si aparece un `kid` desconocido.
+
 ### Errores
 
 Todo fallo no recuperable deja las tres cosas a la vez — excepción registrada,
