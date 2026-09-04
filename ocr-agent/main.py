@@ -46,7 +46,42 @@ try:
 except ImportError:  # pragma: no cover
     _OTEL = False
 
+def _silenciar_subida_de_imagenes() -> str:
+    """Evita el 404 del subidor de imagenes sin llenar la traza de base64.
+
+    El sitecustomize de AMP hace Traceloop.init(api_endpoint=...), y eso engancha
+    el subidor de imagenes del SDK, que postea el blob a
+    /v2/traces/{trace}/spans/{span}/images — un endpoint de Traceloop Cloud que
+    el gateway de AMP no implementa. Resultado: un span hijo en rojo con 404 en
+    cada llamada multimodal.
+
+    Poner Config.upload_base64_image a None NO sirve: el SDK entonces se salta
+    el preprocesado y escribe la data URL entera en el atributo del span
+    (chat_wrappers.py:447). Con una foto de webcam serian cientos de KB por
+    traza.
+
+    Asi que se sustituye por una funcion propia que no llama a nadie y devuelve
+    un marcador legible. El SDK lo coloca en lugar de la imagen: sin 404, sin
+    base64, y en la traza queda constancia de que hubo una imagen y de su
+    tamano. Lo que importa de verdad — origen, mime, dimensiones — va aparte en
+    los atributos amp.entrada.* del span de agente.
+    """
+    try:
+        from opentelemetry.instrumentation.openai.shared.config import Config
+    except ImportError:
+        return "sin SDK de instrumentacion"
+
+    async def _marcador(trace_id, span_id, nombre, base64_string):
+        kb = (len(base64_string) * 3 // 4) // 1024
+        return f"[imagen no almacenada · {nombre} · ~{kb} KB]"
+
+    Config.upload_base64_image = _marcador
+    return "subidor de imagenes sustituido por un marcador"
+
+
 AGENT_NAME = "ocr-agent"
+
+logger.info("instrumentacion: %s", _silenciar_subida_de_imagenes())
 
 app = FastAPI(
     title="ocr-agent — análisis de justificantes de gasto",

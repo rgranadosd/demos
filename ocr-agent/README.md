@@ -232,9 +232,16 @@ imagen y cómo es:
 
 Hace falta ponerlo a mano porque el SDK de Traceloop intenta subir la imagen a
 `/v2/traces/{trace}/spans/{span}/images`, un endpoint de Traceloop Cloud que el
-gateway de AMP **no implementa**: devuelve 404 y deja un span hijo en rojo en
+gateway de AMP **no implementa**: devolvía 404 y dejaba un span hijo en rojo en
 cada llamada multimodal. Verificado — `/otel/v1/traces` responde 401 (existe),
 `/otel/v2/traces/...` responde 404.
+
+El agente sustituye ese subidor por una función propia que no llama a nadie y
+devuelve un marcador corto (`_silenciar_subida_de_imagenes`). Ponerlo a `None`
+no vale: el SDK entonces se salta el preprocesado y escribe la data URL entera
+en el atributo del span (`chat_wrappers.py:447`) — con una foto de webcam,
+cientos de KB por traza. Con el marcador: 57 caracteres en lugar de 37.848, sin
+petición de red y sin 404.
 
 Las dimensiones se leen de la cabecera del PNG o del JPEG, sin Pillow. Importan
 en la traza: una captura de webcam a 1920x1080 y una miniatura a 320x240 dan
