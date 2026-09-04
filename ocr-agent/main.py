@@ -30,7 +30,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -415,8 +415,27 @@ def _analizar(contenido: bytes, mime_type: str) -> Analisis:
     )
 
 
+def _contexto_entrante(cabeceras: Optional[Dict[str, str]]):
+    """Continua la traza que venga en la cabecera `traceparent`, si la hay.
+
+    En el pod solo esta instrumentado `requests`: no hay instrumentacion de
+    FastAPI ni de ASGI, asi que nadie extrae el contexto W3C de la peticion
+    entrante y cada llamada abria una traza nueva. Extrayendolo aqui, el span
+    del agente cuelga de lo que haya iniciado el cliente y el recorrido
+    completo queda bajo un mismo trace id.
+    """
+    if not cabeceras:
+        return None
+    try:
+        from opentelemetry.propagate import extract
+        return extract({k.lower(): v for k, v in cabeceras.items()})
+    except Exception:
+        return None
+
+
 def _con_span_de_agente(contenido: bytes, mime_type: str,
-                        origen: str = "api", nombre: str = "") -> Analisis:
+                        origen: str = "api", nombre: str = "",
+                        cabeceras: Optional[Dict[str, str]] = None) -> Analisis:
     """Abre el span de agente que exige el contrato de instrumentación de AMP.
 
     `gen_ai.operation.name` tiene que ser uno de los seis valores de la
@@ -429,6 +448,7 @@ def _con_span_de_agente(contenido: bytes, mime_type: str,
     tracer = trace.get_tracer(f"amp.{AGENT_NAME}")
     with tracer.start_as_current_span(
         "analizar_gasto",
+        context=_contexto_entrante(cabeceras),
         attributes={
             "gen_ai.operation.name": "invoke_agent",
             "gen_ai.system": os.getenv("AMP_GENAI_SYSTEM", "openai"),
@@ -483,14 +503,15 @@ def health() -> Dict[str, Any]:
 
 
 @app.post("/gastos/analizar", response_model=Analisis)
-def analizar(peticion: PeticionBase64) -> Analisis:
+def analizar(peticion: PeticionBase64, request: Request) -> Analisis:
     """Analiza un justificante. Nunca registra nada."""
     try:
         contenido = base64.b64decode(peticion.imagen_base64)
     except Exception:
         raise HTTPException(status_code=400, detail="imagen_base64 no es base64 valido")
     try:
-        return _con_span_de_agente(contenido, peticion.mime_type, peticion.origen)
+        return _con_span_de_agente(contenido, peticion.mime_type, peticion.origen,
+                                   cabeceras=dict(request.headers))
     except HTTPException:
         raise
     except Exception as exc:
@@ -500,6 +521,7 @@ def analizar(peticion: PeticionBase64) -> Analisis:
 
 @app.post("/gastos/analizar/fichero", response_model=Analisis)
 async def analizar_fichero(
+    request: Request,
     fichero: UploadFile = File(...),
     origen: str = Form(default="fichero"),
 ) -> Analisis:
@@ -511,7 +533,8 @@ async def analizar_fichero(
     contenido = await fichero.read()
     try:
         return _con_span_de_agente(contenido, fichero.content_type or "image/jpeg",
-                                   origen, fichero.filename or "")
+                                   origen, fichero.filename or "",
+                                   cabeceras=dict(request.headers))
     except HTTPException:
         raise
     except Exception as exc:

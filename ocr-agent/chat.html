@@ -82,6 +82,8 @@
               color:var(--suave);white-space:pre-wrap;word-break:break-word}
   .nota{margin-top:15px;padding-top:12px;border-top:1px solid var(--borde);
         font-size:12px;color:var(--suave);line-height:1.6}
+  .traza code{font-family:var(--mono);font-size:11px;color:var(--acento);
+              user-select:all;cursor:text}
 
   .puntos span{display:inline-block;width:6px;height:6px;border-radius:50%;
                background:var(--suave);margin-right:4px;animation:late 1.3s infinite}
@@ -303,7 +305,9 @@ function ficha(d) {
   const t = d.tokens || {};
   h += `<div class="nota">modelo <b>${esc(d.modelo)}</b> · ${t.total ?? '?'} tokens
         (${t.entrada ?? '?'} entrada / ${t.salida ?? '?'} salida) · ${d._segundos ?? '?'} s<br>
-        El gasto <b>no</b> se ha registrado: hace falta confirmación explícita.</div>`;
+        El gasto <b>no</b> se ha registrado: hace falta confirmación explícita.
+        ${d._trace_id ? `<br><span class="traza" title="Búscala en Agent Manager → Traces">
+        traza <code>${esc(d._trace_id)}</code></span>` : ''}</div>`;
   return h + '</div>';
 }
 

@@ -248,6 +248,22 @@ en la traza: una captura de webcam a 1920x1080 y una miniatura a 320x240 dan
 resultados muy distintos, y sin ese dato no hay forma de saber cuál se envió
 cuando una extracción sale mal.
 
+## Seguir la traza desde el cliente
+
+El servidor genera un contexto W3C por peticion y lo manda en la cabecera
+`traceparent`. El agente lo extrae y cuelga `analizar_gasto` de ahi en vez de
+abrir una traza nueva, de modo que navegador, proxy, gateway y agente comparten
+un unico trace id. La ficha del resultado lo muestra al pie, listo para
+copiarlo y buscarlo en Agent Manager.
+
+Hay que extraerlo a mano: en el pod solo esta instrumentado `requests`, no hay
+instrumentacion de FastAPI ni de ASGI, asi que nadie leia la cabecera entrante.
+
+**Limite:** el span del propio cliente no se ve dibujado en AMP. Para eso
+tendria que exportar sus spans a `/otel/v1/traces`, que exige la credencial de
+agente (`AMP_AGENT_API_KEY`) — un cliente externo no deberia llevarla encima.
+Lo que se comparte es el identificador, no los spans del cliente.
+
 ## Notas de despliegue
 
 - Build por **buildpack**: basta `requirements.txt` y el `Procfile`. Sin

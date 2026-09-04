@@ -14,6 +14,7 @@ Solo librería estándar. Arranca con:
 
 import argparse
 import json
+import secrets
 import mimetypes
 import os
 import sys
@@ -70,7 +71,16 @@ def reenviar(imagen: bytes, nombre: str, tipo: str, origen: str = "fichero"):
         imagen,
         f"\r\n--{frontera}--\r\n".encode(),
     ])
-    cabeceras = {"Content-Type": f"multipart/form-data; boundary={frontera}"}
+    # Contexto W3C: el cliente decide el trace id, y el agente cuelga sus spans
+    # de aqui en vez de abrir una traza nueva. Asi el recorrido completo —
+    # navegador, este proxy, gateway y agente — comparte un unico identificador
+    # que se puede buscar en AMP.
+    trace_id = secrets.token_hex(16)
+    span_id = secrets.token_hex(8)
+    cabeceras = {
+        "Content-Type": f"multipart/form-data; boundary={frontera}",
+        "traceparent": f"00-{trace_id}-{span_id}-01",
+    }
     if API_KEY:
         cabeceras["X-API-Key"] = API_KEY
 
@@ -83,6 +93,7 @@ def reenviar(imagen: bytes, nombre: str, tipo: str, origen: str = "fichero"):
         with urllib.request.urlopen(req, timeout=300) as resp:
             datos = json.loads(resp.read().decode())
         datos["_segundos"] = round(time.time() - inicio, 1)
+        datos["_trace_id"] = trace_id
         return 200, datos
     except urllib.error.HTTPError as err:
         detalle = err.read().decode(errors="replace")[:500]
@@ -90,7 +101,8 @@ def reenviar(imagen: bytes, nombre: str, tipo: str, origen: str = "fichero"):
             401: "El gateway ha rechazado la credencial. Revisa OCR_AGENT_API_KEY en .env",
             404: "La ruta no existe. Revisa OCR_AGENT_URL en .env",
         }.get(err.code, "")
-        return err.code, {"error": f"HTTP {err.code}", "detalle": detalle, "pista": pista}
+        return err.code, {"error": f"HTTP {err.code}", "detalle": detalle,
+                          "pista": pista, "_trace_id": trace_id}
     except urllib.error.URLError as err:
         return 502, {"error": "sin conexión con el agente", "detalle": str(err.reason),
                      "pista": "¿Está el cluster levantado y LM Studio arrancado?"}
