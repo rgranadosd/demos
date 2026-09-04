@@ -213,9 +213,12 @@ fetch('/api/config').then(r => r.json()).then(c => {
   chip.className = 'chip ' + (c.con_credencial ? 'on' : 'off');
 }).catch(() => {});
 
-function elegir(f) {
+let origenElegido = 'fichero';   // arrastrar, pegar o escoger fichero
+
+function elegir(f, origen) {
   if (!f || !f.type.startsWith('image/')) return;
   elegido = f;
+  origenElegido = origen || 'fichero';
   etiqueta.textContent = f.name + ' · ' + (f.size / 1024).toFixed(0) + ' KB';
   boton.disabled = false;
 }
@@ -333,11 +336,12 @@ function tarjetaError(d, codigo, intentos) {
   </div>`;
 }
 
-async function pedir(f, espera) {
+async function pedir(f, espera, origen) {
   for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
     pintarEspera(espera, intento);
     try {
       const fd = new FormData();
+      fd.append('origen', origen);
       fd.append('fichero', f, f.name);
       const r = await fetch('/api/analizar', {method: 'POST', body: fd});
       const d = await r.json();
@@ -354,8 +358,9 @@ async function pedir(f, espera) {
   }
 }
 
-async function enviar(fichero) {
+async function enviar(fichero, origen) {
   const f = fichero || elegido;
+  const org = origen || origenElegido;
   if (!f) return;
   boton.disabled = true;
 
@@ -369,7 +374,7 @@ async function enviar(fichero) {
   }
 
   const espera = burbuja('bot', '');
-  const res = await pedir(f, espera);
+  const res = await pedir(f, espera, org);
 
   if (res.ok) {
     espera.innerHTML = ficha(res.datos);
@@ -379,7 +384,7 @@ async function enviar(fichero) {
     // foto: en una demo no se puede pedir que la vuelvan a hacer.
     espera.querySelector('.reintentar').onclick = () => {
       espera.closest('.msg').remove();
-      enviar(f);
+      enviar(f, org);
     };
   }
   espera.scrollIntoView({behavior: 'smooth', block: 'end'});
@@ -465,7 +470,7 @@ function capturar() {
   lienzo.toBlob(b => {
     if (!b) return;
     const sello = new Date().toISOString().slice(11, 19).replace(/:/g, '');
-    elegir(new File([b], `captura-${sello}.jpg`, {type: 'image/jpeg'}));
+    elegir(new File([b], `captura-${sello}.jpg`, {type: 'image/jpeg'}), 'camara');
     cerrarCamara();
     enviar();          // una foto se hace para analizarla: no hace falta otro clic
   }, 'image/jpeg', 0.92);

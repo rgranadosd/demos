@@ -30,7 +30,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -97,6 +97,10 @@ class Analisis(BaseModel):
 class PeticionBase64(BaseModel):
     imagen_base64: str = Field(description="Imagen del justificante, sin cabecera data:")
     mime_type: str = Field(default="image/jpeg")
+    origen: str = Field(
+        default="api",
+        description="De donde procede: camara, fichero, cli, api. Queda en la traza.",
+    )
 
 
 class PeticionRegistro(BaseModel):
@@ -205,6 +209,36 @@ def _cliente() -> tuple:
     return cliente, modelo, binding
 
 
+def _dimensiones(contenido: bytes) -> Optional[str]:
+    """Ancho x alto leyendo la cabecera, sin depender de Pillow.
+
+    Interesa en la traza: una captura de webcam a 1920x1080 y una miniatura de
+    320x240 dan resultados muy distintos, y sin este dato no hay forma de saber
+    cual se envio cuando una extraccion sale mal.
+    """
+    try:
+        if contenido[:8] == b"\x89PNG\r\n\x1a\n":
+            w = int.from_bytes(contenido[16:20], "big")
+            h = int.from_bytes(contenido[20:24], "big")
+            return f"{w}x{h}"
+        if contenido[:2] == b"\xff\xd8":            # JPEG: recorrer segmentos
+            i = 2
+            while i < len(contenido) - 9:
+                if contenido[i] != 0xFF:
+                    i += 1
+                    continue
+                marca = contenido[i + 1]
+                if marca in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                             0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h = int.from_bytes(contenido[i + 5:i + 7], "big")
+                    w = int.from_bytes(contenido[i + 7:i + 9], "big")
+                    return f"{w}x{h}"
+                i += 2 + int.from_bytes(contenido[i + 2:i + 4], "big")
+    except Exception:
+        pass
+    return None
+
+
 def _extraer_json(texto: str) -> Dict[str, Any]:
     """Rescata el JSON aunque venga envuelto en ```json ... ```."""
     limpio = texto.strip()
@@ -260,8 +294,9 @@ def _revisar_cuadre(gasto: Gasto) -> Dict[str, Any]:
     return resultado
 
 
-def _analizar(imagen_b64: str, mime_type: str) -> Analisis:
+def _analizar(contenido: bytes, mime_type: str) -> Analisis:
     cliente, modelo, _ = _cliente()
+    imagen_b64 = base64.b64encode(contenido).decode()
 
     respuesta = cliente.chat.completions.create(
         model=modelo,
@@ -345,7 +380,8 @@ def _analizar(imagen_b64: str, mime_type: str) -> Analisis:
     )
 
 
-def _con_span_de_agente(imagen_b64: str, mime_type: str) -> Analisis:
+def _con_span_de_agente(contenido: bytes, mime_type: str,
+                        origen: str = "api", nombre: str = "") -> Analisis:
     """Abre el span de agente que exige el contrato de instrumentación de AMP.
 
     `gen_ai.operation.name` tiene que ser uno de los seis valores de la
@@ -353,7 +389,7 @@ def _con_span_de_agente(imagen_b64: str, mime_type: str) -> Analisis:
     — sin icono, sin ficha de agente y sin evaluadores — y no avisa de nada.
     """
     if not _OTEL:
-        return _analizar(imagen_b64, mime_type)
+        return _analizar(contenido, mime_type)
 
     tracer = trace.get_tracer(f"amp.{AGENT_NAME}")
     with tracer.start_as_current_span(
@@ -363,9 +399,20 @@ def _con_span_de_agente(imagen_b64: str, mime_type: str) -> Analisis:
             "gen_ai.system": os.getenv("AMP_GENAI_SYSTEM", "openai"),
             "gen_ai.agent.name": AGENT_NAME,
             "traceloop.span.kind": "agent",
+            # De donde viene la imagen y como es. El SDK de Traceloop intenta
+            # subir el blob a /v2/traces/.../images, un endpoint de Traceloop
+            # Cloud que el gateway de AMP no implementa (404), asi que sin esto
+            # la traza no diria nada de la entrada. Van en el namespace amp.*
+            # porque no son claves del contrato semconv, solo atributos
+            # buscables.
+            "amp.entrada.origen": origen,
+            "amp.entrada.mime": mime_type,
+            "amp.entrada.bytes": len(contenido),
+            "amp.entrada.dimensiones": _dimensiones(contenido) or "desconocidas",
+            "amp.entrada.nombre": nombre or "(sin nombre)",
         },
     ) as span:
-        resultado = _analizar(imagen_b64, mime_type)
+        resultado = _analizar(contenido, mime_type)
         # Los evaluadores de nivel agente leen estos dos atributos. Sin ellos el
         # monitor se ejecuta pero no tiene nada que puntuar.
         span.set_attribute(
@@ -404,7 +451,11 @@ def health() -> Dict[str, Any]:
 def analizar(peticion: PeticionBase64) -> Analisis:
     """Analiza un justificante. Nunca registra nada."""
     try:
-        return _con_span_de_agente(peticion.imagen_base64, peticion.mime_type)
+        contenido = base64.b64decode(peticion.imagen_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="imagen_base64 no es base64 valido")
+    try:
+        return _con_span_de_agente(contenido, peticion.mime_type, peticion.origen)
     except HTTPException:
         raise
     except Exception as exc:
@@ -413,12 +464,19 @@ def analizar(peticion: PeticionBase64) -> Analisis:
 
 
 @app.post("/gastos/analizar/fichero", response_model=Analisis)
-async def analizar_fichero(fichero: UploadFile = File(...)) -> Analisis:
-    """Igual que /gastos/analizar, subiendo el fichero directamente."""
+async def analizar_fichero(
+    fichero: UploadFile = File(...),
+    origen: str = Form(default="fichero"),
+) -> Analisis:
+    """Igual que /gastos/analizar, subiendo el fichero directamente.
+
+    `origen` dice si la imagen viene de la camara, de un fichero o del CLI. No
+    cambia el analisis: queda en la traza para poder distinguirlos despues.
+    """
     contenido = await fichero.read()
-    b64 = base64.b64encode(contenido).decode()
     try:
-        return _con_span_de_agente(b64, fichero.content_type or "image/jpeg")
+        return _con_span_de_agente(contenido, fichero.content_type or "image/jpeg",
+                                   origen, fichero.filename or "")
     except HTTPException:
         raise
     except Exception as exc:

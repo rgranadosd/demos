@@ -104,6 +104,9 @@ def multipart(ruta):
 
     cuerpo = b"".join([
         f"--{frontera}\r\n".encode(),
+        f'Content-Disposition: form-data; name="origen"\r\n\r\n'.encode(),
+        b"cli\r\n",
+        f"--{frontera}\r\n".encode(),
         f'Content-Disposition: form-data; name="fichero"; filename="{nombre}"\r\n'.encode(),
         f"Content-Type: {tipo}\r\n\r\n".encode(),
         contenido,

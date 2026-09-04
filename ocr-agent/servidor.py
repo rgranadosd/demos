@@ -52,10 +52,18 @@ AGENTE_URL = os.getenv(
 API_KEY = os.getenv("OCR_AGENT_API_KEY", "")
 
 
-def reenviar(imagen: bytes, nombre: str, tipo: str):
-    """Manda la imagen al agente y devuelve (codigo, cuerpo_json)."""
+def reenviar(imagen: bytes, nombre: str, tipo: str, origen: str = "fichero"):
+    """Manda la imagen al agente y devuelve (codigo, cuerpo_json).
+
+    Se reenvia tambien de donde viene la imagen. No cambia el analisis: el
+    agente lo deja en la traza, que es la unica forma de distinguir despues una
+    captura de camara de un fichero arrastrado.
+    """
     frontera = f"----ocr{uuid.uuid4().hex}"
     cuerpo = b"".join([
+        f"--{frontera}\r\n".encode(),
+        f'Content-Disposition: form-data; name="origen"\r\n\r\n'.encode(),
+        f"{origen}\r\n".encode(),
         f"--{frontera}\r\n".encode(),
         f'Content-Disposition: form-data; name="fichero"; filename="{nombre}"\r\n'.encode(),
         f"Content-Type: {tipo}\r\n\r\n".encode(),
@@ -131,8 +139,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._responder(400, {"error": "falta boundary"})
         b = tipo_cab.split("boundary=")[1].strip().strip('"').encode()
 
-        nombre, tipo, imagen = "captura.png", "image/png", None
+        nombre, tipo, imagen, origen = "captura.png", "image/png", None, "fichero"
         for parte in crudo.split(b"--" + b):
+            if b'name="origen"' in parte and b"filename=" not in parte:
+                _, _, val = parte.partition(b"\r\n\r\n")
+                origen = val.strip().decode(errors="replace") or origen
+                continue
             if b"filename=" not in parte:
                 continue
             cabeceras, _, datos = parte.partition(b"\r\n\r\n")
@@ -147,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
         if not imagen:
             return self._responder(400, {"error": "no se ha recibido ninguna imagen"})
 
-        codigo, respuesta = reenviar(imagen, nombre, tipo)
+        codigo, respuesta = reenviar(imagen, nombre, tipo, origen)
         return self._responder(codigo, respuesta)
 
 

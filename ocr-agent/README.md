@@ -219,6 +219,28 @@ importe es el número impreso y no se calcula nunca.
 Es la mejor defensa del diseño: **la verificación en código encontró un fallo
 que el modelo no iba a confesar**.
 
+## Qué queda trazado
+
+El span de agente lleva, además de los tokens y el contenido, de dónde viene la
+imagen y cómo es:
+
+    amp.entrada.origen        camara | fichero | cli | api
+    amp.entrada.mime          image/jpeg
+    amp.entrada.dimensiones   1920x1080
+    amp.entrada.bytes         184320
+    amp.entrada.nombre        captura-114240.jpg
+
+Hace falta ponerlo a mano porque el SDK de Traceloop intenta subir la imagen a
+`/v2/traces/{trace}/spans/{span}/images`, un endpoint de Traceloop Cloud que el
+gateway de AMP **no implementa**: devuelve 404 y deja un span hijo en rojo en
+cada llamada multimodal. Verificado — `/otel/v1/traces` responde 401 (existe),
+`/otel/v2/traces/...` responde 404.
+
+Las dimensiones se leen de la cabecera del PNG o del JPEG, sin Pillow. Importan
+en la traza: una captura de webcam a 1920x1080 y una miniatura a 320x240 dan
+resultados muy distintos, y sin ese dato no hay forma de saber cuál se envió
+cuando una extracción sale mal.
+
 ## Notas de despliegue
 
 - Build por **buildpack**: basta `requirements.txt` y el `Procfile`. Sin
