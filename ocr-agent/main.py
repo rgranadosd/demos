@@ -39,6 +39,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 
+import agent_identity
 import esquema
 import llm_binding
 import observabilidad as obs
@@ -115,6 +116,7 @@ _ORIGENES = {
 
 logger.info("instrumentacion: %s", _silenciar_subida_de_imagenes())
 logger.info("privacidad: %s", obs.instalar_redactor())
+logger.info("identidad: %s", agent_identity.describir())
 
 app = FastAPI(
     title="ocr-agent — análisis de justificantes de gasto",
@@ -814,6 +816,8 @@ def _analizar_justificante(contenido: bytes, mime_type: str,
         # uno aquí no correlacionaría nada, sería un uuid por petición.
         "gen_ai.conversation.id": cabeceras.get("x-conversation-id") or None,
     }
+    # Quién actúa, según ThunderID y no según una cadena escrita en el código.
+    atributos.update(agent_identity.identidad_agente().atributos())
 
     etiquetas = obs.etiquetas_base(mime_type=atributos["expense.document.mime_type"])
     obs.metricas().peticiones.add(1, etiquetas)
@@ -921,6 +925,7 @@ def _analizar_justificante(contenido: bytes, mime_type: str,
 def health() -> Dict[str, Any]:
     """Estado y, sobre todo, qué LLM le ha asignado AMP."""
     binding = llm_binding.resolver()
+    identidad = agent_identity.identidad_agente()
     return {
         "status": "ok",
         "agente": AGENT_NAME,
@@ -928,6 +933,8 @@ def health() -> Dict[str, Any]:
         "llm_origen": binding.origen if binding else None,
         "llm_base_url": binding.base_url if binding else None,
         "modelo": llm_binding.modelo() or None,
+        "identidad_agente": identidad.agent_id,
+        "identidad_origen": identidad.origen,
     }
 
 

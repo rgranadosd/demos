@@ -570,11 +570,13 @@ def instalar_redactor() -> str:
     try:
         provider = trace.get_tracer_provider()
         procesadores = _procesadores(provider)
+        if not procesadores:
+            return "no hay procesadores de spans: sin tracing que redactar"
         envueltos = sum(1 for p in procesadores if envolver_exporter(p))
         if not envueltos:
             return (
-                f"AVISO: no se pudo envolver ningun exporter de {len(procesadores)} "
-                "procesador(es); el contenido de la instrumentacion automatica sale SIN redactar"
+                f"AVISO: hay {len(procesadores)} procesador(es) pero no se pudo envolver "
+                "su exporter; el contenido de la instrumentacion automatica sale SIN redactar"
             )
         return f"redactor '{CONFIG.captura}' instalado en {envueltos} exporter(s)"
     except Exception as exc:  # pragma: no cover

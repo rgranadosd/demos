@@ -143,6 +143,10 @@ def test_respuesta_valida_produce_el_arbol_de_spans(exporter, monkeypatch):
     raiz = spans["invoke_agent ocr-agent"]
     assert raiz.attributes["gen_ai.operation.name"] == "invoke_agent"
     assert raiz.attributes["gen_ai.agent.name"] == "ocr-agent"
+    # Sin AMP_AGENTID_* no hay firma de ThunderID, pero el actor se declara.
+    assert raiz.attributes["auth.actor.type"] == "agent"
+    assert raiz.attributes["auth.source"] == "api_key"
+    assert raiz.attributes["auth.delegation"] is False
     assert raiz.attributes["expense.document.source"] == "upload"
     assert raiz.attributes["expense.document.type_hint"] == "ticket"
     assert raiz.attributes["expense.ocr.output_valid_json"] is True

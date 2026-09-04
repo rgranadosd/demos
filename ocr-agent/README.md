@@ -385,6 +385,44 @@ original del fichero, comercio, resumen, líneas, fechas ni importes.
 calibrada y fabricarla convertiría un número inventado en una decisión de
 negocio.
 
+### Identidad del agente
+
+AMP registra el agente como principal de primera clase en **ThunderID** y le
+inyecta al pod sus credenciales OAuth2:
+
+```
+AMP_AGENTID_CLIENT_ID       el client id del agente en ThunderID
+AMP_AGENTID_CLIENT_SECRET   (en el Secret del pod)
+AMP_AGENTID_TOKEN_ENDPOINT  el /oauth2/token de la instancia del proyecto
+AMP_AGENTID_SCOPES          vacío mientras el agente no tenga roles
+```
+
+Pero **no las conecta con las trazas**: el `sitecustomize` que instala la
+instrumentación son 34 líneas que solo llaman a `Traceloop.init()` y no
+mencionan esas variables. Sin esto, lo único que identificaba al agente en la
+traza era `gen_ai.agent.name`, una cadena escrita en el código — si alguien la
+cambia, la traza miente y nadie se entera.
+
+[agent_identity.py](agent_identity.py) pide el token propio del agente
+(`client_credentials`), saca el `sub` y publica en el span raíz:
+
+| Atributo | Valor |
+|---|---|
+| `gen_ai.agent.id` | el `sub` del token, firmado por ThunderID |
+| `auth.actor.type` | `agent` |
+| `auth.source` | `agent_token` \| `api_key` \| `unresolved` |
+| `auth.issuer` | el `iss` del token |
+| `auth.delegation` | `false` — todavía no hay OBO |
+
+El token se cachea hasta que caduca: no se llama a ThunderID en cada ticket. Y
+si ThunderID no responde, **el análisis sigue** y el span dice
+`auth.source = unresolved`. Que un problema de trazabilidad tumbe el servicio
+sería peor que no saber quién actuó.
+
+`auth.source = api_key` significa que no había `AMP_AGENTID_*` — el caso de una
+ejecución local, donde el endpoint de ThunderID no resuelve desde fuera del
+clúster.
+
 ### Errores
 
 Todo fallo no recuperable deja las tres cosas a la vez — excepción registrada,
