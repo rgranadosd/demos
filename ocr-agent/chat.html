@@ -90,27 +90,34 @@
   @keyframes late{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
 
   .camara{max-width:820px;margin:0 auto 12px;border:1px solid var(--borde);
-          border-radius:14px;overflow:hidden;background:#000;position:relative;display:none}
+          border-radius:14px;overflow:hidden;background:#000;display:none}
   .camara.abierta{display:block}
-  .camara video{width:100%;max-height:46vh;object-fit:contain;display:block}
-  .camara video.espejo{transform:scaleX(-1)}
+  /* El visor es el único contexto de posicionamiento: guía, pista y medidor van
+     sobre el VÍDEO. Colgando de .camara se superponían a los botones, y el marco
+     bajaba hasta la fila de mandos, así que el rectángulo dibujado no era la
+     zona que de verdad se mide. */
+  .visor{position:relative;line-height:0;background:#000}
+  .visor video{width:100%;max-height:52vh;object-fit:contain;display:block}
+  .visor video.espejo{transform:scaleX(-1)}
   button.reintentar{padding:8px 14px;font-size:12.5px;border-radius:8px}
-  .medidor{position:absolute;left:0;right:0;bottom:0;padding:10px 14px;
+  .visor .medidor{position:absolute;left:0;right:0;bottom:0;padding:10px 14px;
+           line-height:1.4;
            background:linear-gradient(transparent,rgba(0,0,0,.75));pointer-events:none}
-  .medidor .txt{font-size:12px;color:#fff;text-shadow:0 1px 3px #000;
+  .visor .txt{font-size:12px;color:#fff;text-shadow:0 1px 3px #000;
                 display:flex;justify-content:space-between;margin-bottom:6px}
-  .medidor .txt .num{font-family:var(--mono);opacity:.7;font-size:11px}
+  .visor .txt .num{font-family:var(--mono);opacity:.7;font-size:11px}
   .barra-foco{height:4px;border-radius:2px;background:rgba(255,255,255,.2);overflow:hidden}
   .barra-foco i{display:block;height:100%;width:0;background:var(--aviso);
                 transition:width .15s linear,background .2s}
   .barra-foco.listo i{background:var(--ok)}
-  .camara .guia{position:absolute;inset:8% 18%;border:2px dashed rgba(255,255,255,.35);
-                border-radius:10px;pointer-events:none}
+  .visor .guia{position:absolute;left:18%;top:8%;width:64%;height:84%;
+               border:2px dashed rgba(255,255,255,.4);border-radius:10px;
+               pointer-events:none}
   .camara .mandos{display:flex;gap:10px;justify-content:center;padding:12px;
                   background:var(--panel);border-top:1px solid var(--borde)}
-  .camara .pista{position:absolute;top:10px;left:0;right:0;text-align:center;
-                 font-size:12px;color:rgba(255,255,255,.75);text-shadow:0 1px 3px #000;
-                 pointer-events:none}
+  .visor .pista{position:absolute;top:10px;left:0;right:0;text-align:center;
+                font-size:12px;line-height:1.4;color:rgba(255,255,255,.8);
+                text-shadow:0 1px 3px #000;pointer-events:none}
   button.sec{background:transparent;color:var(--suave);border:1px solid var(--borde)}
   button.sec:hover{color:var(--texto);border-color:var(--suave)}
 
@@ -153,13 +160,15 @@
 
 <footer>
   <div class="camara" id="camara">
-    <video id="video" playsinline autoplay muted></video>
-    <div class="guia"></div>
-    <div class="pista">Encuadra el ticket en el marco: se captura solo al enfocar</div>
-    <div class="medidor">
-      <div class="txt"><span id="estadofoco">preparando…</span>
-                       <span class="num" id="numfoco"></span></div>
-      <div class="barra-foco" id="barrafoco"><i></i></div>
+    <div class="visor">
+      <video id="video" playsinline autoplay muted></video>
+      <div class="guia"></div>
+      <div class="pista">Encuadra el ticket en el marco: se captura solo al enfocar</div>
+      <div class="medidor">
+        <div class="txt"><span id="estadofoco">preparando…</span>
+                         <span class="num" id="numfoco"></span></div>
+        <div class="barra-foco" id="barrafoco"><i></i></div>
+      </div>
     </div>
     <div class="mandos">
       <button id="capturar">Capturar y analizar</button>
@@ -582,7 +591,16 @@ function tick() {
   if (AUTO && seguidas >= ESTABLES) capturar();
 }
 
+function ajustarVisor() {
+  // Se le da al visor la misma proporción que el vídeo. Sin esto, object-fit
+  // deja bandas negras y el marco dibujado deja de coincidir con el recorte
+  // que se mide (MARCO recorta el fotograma de origen, no lo que se ve).
+  if (video.videoWidth && video.videoHeight)
+    video.parentElement.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+}
+
 function arrancarMedidor() {
+  ajustarVisor();
   previo = null; mejor = 0; seguidas = 0; conPapel = 0; ruido = Infinity;
   clearInterval(temporizador);
   temporizador = setInterval(tick, MUESTREO_MS);
