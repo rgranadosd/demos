@@ -528,6 +528,34 @@ def _procesadores(provider) -> list:
     return list(hijos) if hijos else [activo]
 
 
+def _sabe_exportar(valor) -> bool:
+    return callable(getattr(valor, "export", None)) and callable(getattr(valor, "shutdown", None))
+
+
+def envolver_exporter(procesador) -> bool:
+    """Sustituye el exporter del procesador por el redactor.
+
+    Se busca por pato, el atributo que sabe exportar, en vez de asignar
+    `span_exporter`: desde el SDK 1.3x esa es una propiedad de solo lectura y
+    el exporter vive en `_batch_processor._exporter`. Asignarla lanzaba
+    AttributeError y la redaccion se quedaba sin instalar **en silencio
+    salvo por un WARNING**, que es justo como se cuela un fallo de privacidad.
+    """
+    for portador in (procesador, getattr(procesador, "_batch_processor", None)):
+        if portador is None:
+            continue
+        for nombre, valor in list(vars(portador).items()):
+            if isinstance(valor, RedactorExporter):
+                return True
+            if _sabe_exportar(valor):
+                try:
+                    setattr(portador, nombre, RedactorExporter(valor))
+                except Exception:  # pragma: no cover
+                    continue
+                return True
+    return False
+
+
 def instalar_redactor() -> str:
     """Engancha el redactor a los exporters del provider que AMP ya instalo.
 
@@ -541,15 +569,13 @@ def instalar_redactor() -> str:
     # imagen en base64 acabe en un atributo.
     try:
         provider = trace.get_tracer_provider()
-        envueltos = 0
-        for procesador in _procesadores(provider):
-            exporter = getattr(procesador, "span_exporter", None)
-            if exporter is None or isinstance(exporter, RedactorExporter):
-                continue
-            procesador.span_exporter = RedactorExporter(exporter)
-            envueltos += 1
+        procesadores = _procesadores(provider)
+        envueltos = sum(1 for p in procesadores if envolver_exporter(p))
         if not envueltos:
-            return "no se encontro ningun exporter que envolver (redaccion solo en los spans propios)"
+            return (
+                f"AVISO: no se pudo envolver ningun exporter de {len(procesadores)} "
+                "procesador(es); el contenido de la instrumentacion automatica sale SIN redactar"
+            )
         return f"redactor '{CONFIG.captura}' instalado en {envueltos} exporter(s)"
     except Exception as exc:  # pragma: no cover
         logger.warning("no se pudo instalar el redactor de trazas: %s", exc)

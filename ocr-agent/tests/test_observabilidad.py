@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
@@ -322,24 +322,46 @@ def test_hash_de_documento_necesita_sal(monkeypatch):
     assert main._hash_documento("factura-4471") == opaco
 
 
-def test_el_redactor_envuelve_el_exporter_del_provider():
+@pytest.mark.parametrize("clase_procesador", [SimpleSpanProcessor, BatchSpanProcessor])
+def test_el_redactor_envuelve_el_exporter_del_provider(clase_procesador):
+    """En BatchSpanProcessor el exporter no es asignable: hay que ir a buscarlo.
+
+    Probarlo solo con SimpleSpanProcessor daba verde y en el pod la redaccion
+    no se instalaba, porque `span_exporter` es una propiedad de solo lectura
+    desde el SDK 1.3x.
+    """
     provider = TracerProvider()
     memoria = InMemorySpanExporter()
-    provider.add_span_processor(SimpleSpanProcessor(memoria))
+    provider.add_span_processor(clase_procesador(memoria))
 
     procesadores = obs._procesadores(provider)
     assert procesadores, "hay que encontrar los procesadores que ya instalo AMP"
-    for procesador in procesadores:
-        procesador.span_exporter = obs.RedactorExporter(procesador.span_exporter)
+    assert all(obs.envolver_exporter(p) for p in procesadores)
 
     tracer = provider.get_tracer("prueba")
     with tracer.start_as_current_span("x") as span:
         span.set_attribute("gen_ai.prompt.0.content", "data:image/png;base64,AAAA")
         span.set_attribute("gen_ai.usage.total_tokens", 7)
+    provider.force_flush()
 
     atributos = memoria.get_finished_spans()[0].attributes
     assert "gen_ai.prompt.0.content" not in atributos
     assert atributos["gen_ai.usage.total_tokens"] == 7
+    provider.shutdown()
+
+
+def test_envolver_exporter_es_idempotente():
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(InMemorySpanExporter()))
+    procesador = obs._procesadores(provider)[0]
+
+    assert obs.envolver_exporter(procesador) is True
+    assert obs.envolver_exporter(procesador) is True
+
+    portador = procesador._batch_processor
+    envueltos = [v for v in vars(portador).values() if isinstance(v, obs.RedactorExporter)]
+    assert len(envueltos) == 1, "no debe apilarse un redactor sobre otro"
+    provider.shutdown()
 
 
 # -------------------------------------------------------------------- esquema
