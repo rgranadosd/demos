@@ -92,12 +92,18 @@
   .camara{max-width:820px;margin:0 auto 12px;border:1px solid var(--borde);
           border-radius:14px;overflow:hidden;background:#000;display:none}
   .camara.abierta{display:block}
+  /* Con la cámara abierta sobran la invitación a enviar una foto y la barra de
+     arrastrar: ya se está tomando una. Se ocultan para que el visor respire y
+     no queden textos cortados detrás del panel. */
+  body.con-camara .vacio{display:none}
+  body.con-camara .barra{display:none}
+  body.con-camara main{opacity:.35;pointer-events:none}
   /* El visor es el único contexto de posicionamiento: guía, pista y medidor van
      sobre el VÍDEO. Colgando de .camara se superponían a los botones, y el marco
      bajaba hasta la fila de mandos, así que el rectángulo dibujado no era la
      zona que de verdad se mide. */
   .visor{position:relative;line-height:0;background:#000}
-  .visor video{width:100%;max-height:52vh;object-fit:contain;display:block}
+  .visor video{width:100%;max-height:46vh;object-fit:contain;display:block}
   .visor video.espejo{transform:scaleX(-1)}
   button.reintentar{padding:8px 14px;font-size:12.5px;border-radius:8px}
   .visor .medidor{position:absolute;left:0;right:0;bottom:0;padding:10px 14px;
@@ -412,6 +418,7 @@ async function abrirCamara() {
   video.srcObject = flujo;
   video.classList.toggle('espejo', ESPEJO);
   panel.classList.add('abierta');
+  document.body.classList.add('con-camara');
   // Si los metadatos ya estaban cargados el evento no vuelve a dispararse y el
   // medidor no arrancaría nunca. Se engancha Y se comprueba.
   video.addEventListener('loadedmetadata', arrancarMedidor, {once: true});
@@ -425,6 +432,7 @@ function cerrarCamara() {
   flujo = null;
   video.srcObject = null;
   panel.classList.remove('abierta');
+  document.body.classList.remove('con-camara');
   $('#abrircam').disabled = false;
 }
 
