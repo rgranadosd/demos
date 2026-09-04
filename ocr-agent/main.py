@@ -24,27 +24,31 @@ un prompt es una súplica y esto tiene que ser una garantía:
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+import sys
+import time
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+import esquema
 import llm_binding
+import observabilidad as obs
 
 logger = logging.getLogger("ocr-agent")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-
-try:
-    from opentelemetry import trace
-
-    _OTEL = True
-except ImportError:  # pragma: no cover
-    _OTEL = False
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s [trace_id=%(trace_id)s span_id=%(span_id)s] %(message)s",
+)
+obs.instalar_correlacion_de_logs(logger)
 
 def _silenciar_subida_de_imagenes() -> str:
     """Evita el 404 del subidor de imagenes sin llenar la traza de base64.
@@ -64,7 +68,7 @@ def _silenciar_subida_de_imagenes() -> str:
     un marcador legible. El SDK lo coloca en lugar de la imagen: sin 404, sin
     base64, y en la traza queda constancia de que hubo una imagen y de su
     tamano. Lo que importa de verdad — origen, mime, dimensiones — va aparte en
-    los atributos amp.entrada.* del span de agente.
+    los atributos expense.document.* del span de agente.
     """
     try:
         from opentelemetry.instrumentation.openai.shared.config import Config
@@ -79,9 +83,38 @@ def _silenciar_subida_de_imagenes() -> str:
     return "subidor de imagenes sustituido por un marcador"
 
 
-AGENT_NAME = "ocr-agent"
+AGENT_NAME = obs.AGENT_NAME
+
+# Tipos que el modelo de vision acepta y que sabemos medir. Cerrado a proposito:
+# lo que no este aqui se rechaza en `app.document.validate` con 415, en vez de
+# gastar una llamada al gateway para que falle alla.
+MIMES_ACEPTADOS = ("image/jpeg", "image/jpg", "image/png", "image/webp")
+
+_FIRMAS = {
+    b"\x89PNG\r\n\x1a\n": "image/png",
+    b"\xff\xd8\xff": "image/jpeg",
+}
+
+try:
+    TAMANO_MAXIMO_BYTES = int(os.getenv("EXPENSE_OCR_MAX_BYTES", str(10 * 1024 * 1024)))
+except ValueError:  # pragma: no cover
+    TAMANO_MAXIMO_BYTES = 10 * 1024 * 1024
+
+# Origen del documento, enumerado. Cualquier otra cosa cae en "unknown": un
+# atributo con texto libre del cliente es cardinalidad sin control.
+_ORIGENES = {
+    "api": "api",
+    "upload": "upload",
+    "fichero": "upload",
+    "file": "upload",
+    "camara": "camera",
+    "camera": "camera",
+    "cli": "cli",
+    "email": "email",
+}
 
 logger.info("instrumentacion: %s", _silenciar_subida_de_imagenes())
+logger.info("privacidad: %s", obs.instalar_redactor())
 
 app = FastAPI(
     title="ocr-agent — análisis de justificantes de gasto",
@@ -244,8 +277,8 @@ def _cliente() -> tuple:
     return cliente, modelo, binding
 
 
-def _dimensiones(contenido: bytes) -> Optional[str]:
-    """Ancho x alto leyendo la cabecera, sin depender de Pillow.
+def _dimensiones(contenido: bytes) -> Optional[Tuple[int, int]]:
+    """Ancho y alto leyendo la cabecera, sin depender de Pillow.
 
     Interesa en la traza: una captura de webcam a 1920x1080 y una miniatura de
     320x240 dan resultados muy distintos, y sin este dato no hay forma de saber
@@ -255,7 +288,7 @@ def _dimensiones(contenido: bytes) -> Optional[str]:
         if contenido[:8] == b"\x89PNG\r\n\x1a\n":
             w = int.from_bytes(contenido[16:20], "big")
             h = int.from_bytes(contenido[20:24], "big")
-            return f"{w}x{h}"
+            return (w, h)
         if contenido[:2] == b"\xff\xd8":            # JPEG: recorrer segmentos
             i = 2
             while i < len(contenido) - 9:
@@ -267,11 +300,122 @@ def _dimensiones(contenido: bytes) -> Optional[str]:
                              0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
                     h = int.from_bytes(contenido[i + 5:i + 7], "big")
                     w = int.from_bytes(contenido[i + 7:i + 9], "big")
-                    return f"{w}x{h}"
+                    return (w, h)
                 i += 2 + int.from_bytes(contenido[i + 2:i + 4], "big")
     except Exception:
         pass
     return None
+
+
+class ErrorDocumento(Exception):
+    """Documento rechazado antes de gastar una llamada al modelo."""
+
+    def __init__(self, error_type: str, mensaje: str, status_code: int = 400):
+        super().__init__(mensaje)
+        self.error_type = error_type
+        self.mensaje = mensaje
+        self.status_code = status_code
+
+
+def _origen_normalizado(origen: str) -> str:
+    return _ORIGENES.get((origen or "").strip().lower(), "unknown")
+
+
+def _hash_documento(document_id: str) -> Optional[str]:
+    """Identificador opaco del documento, con sal.
+
+    Sin `EXPENSE_OCR_ID_SALT` no se emite nada: un hash sin sal de un id corto
+    se revierte por fuerza bruta en segundos y dejaria de ser seudonimo.
+    """
+    sal = os.getenv("EXPENSE_OCR_ID_SALT", "").strip()
+    if not document_id or not sal:
+        return None
+    return hmac.new(sal.encode(), document_id.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def _validar_documento(contenido: bytes, mime_type: str) -> Dict[str, Any]:
+    """Fase `app.document.validate`. Devuelve los datos tecnicos del fichero.
+
+    Lo que no pase de aqui no llega al gateway: un 415 barato ahorra una
+    llamada al modelo que iba a fallar de todas formas.
+    """
+    mime = (mime_type or "").split(";")[0].strip().lower()
+
+    if not contenido:
+        raise ErrorDocumento("corrupt_file", "el fichero llego vacio", 400)
+    if mime not in MIMES_ACEPTADOS:
+        raise ErrorDocumento(
+            "unsupported_media_type",
+            f"tipo no soportado: {mime or 'desconocido'}. Se aceptan {', '.join(MIMES_ACEPTADOS)}",
+            415,
+        )
+    if len(contenido) > TAMANO_MAXIMO_BYTES:
+        raise ErrorDocumento(
+            "file_too_large",
+            f"la imagen ocupa {len(contenido)} bytes y el maximo es {TAMANO_MAXIMO_BYTES}",
+            413,
+        )
+
+    firma = next((v for k, v in _FIRMAS.items() if contenido.startswith(k)), None)
+    dimensiones = _dimensiones(contenido)
+    # WebP no lleva una firma en `_FIRMAS` y sus dimensiones no se leen aqui;
+    # se acepta si el cliente lo declara, pero sin firma ni tamano conocidos.
+    if firma is None and mime != "image/webp":
+        raise ErrorDocumento("invalid_image", "el contenido no es un PNG ni un JPEG valido", 400)
+
+    ancho, alto = dimensiones if dimensiones else (None, None)
+    if ancho is not None and (ancho <= 0 or alto <= 0):
+        raise ErrorDocumento("invalid_image", "la imagen declara dimensiones imposibles", 400)
+
+    if ancho is None:
+        orientacion = "unknown"
+    elif ancho > alto:
+        orientacion = "landscape"
+    else:
+        orientacion = "portrait"
+
+    return {
+        "mime_type": mime,
+        "size_bytes": len(contenido),
+        "width": ancho,
+        "height": alto,
+        "orientation": orientacion,
+        # Sin render de PDF, un justificante es siempre una pagina.
+        "page_count": 1,
+    }
+
+
+def _llm_autoinstrumentado() -> bool:
+    """Dice si el SDK de OpenAI ya viene envuelto por la instrumentacion de AMP.
+
+    Si lo esta, la llamada al modelo ya genera su propio span `openai.chat` y
+    envolverla en otro span de cliente seria duplicar la misma semantica.
+
+    Se mira si el modulo esta cargado, no si `Completions.create` tiene
+    `__wrapped__`: el propio SDK de OpenAI decora ese metodo con
+    `functools.wraps`, asi que ese atributo esta siempre y daria un falso
+    positivo que dejaria la llamada al modelo sin ningun span.
+    """
+    return "opentelemetry.instrumentation.openai" in sys.modules
+
+
+@contextmanager
+def _span_llamada_modelo(modelo: str) -> Iterator[Any]:
+    """Span de la llamada al modelo, solo si nadie mas lo esta creando."""
+    if _llm_autoinstrumentado():
+        yield None
+        return
+    with obs.span_fase(
+        f"chat {modelo}",
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": os.getenv("AMP_GENAI_SYSTEM", "openai"),
+            "gen_ai.request.model": modelo,
+            "gen_ai.request.temperature": 0,
+            "gen_ai.request.max_tokens": 1500,
+        },
+    ) as span:
+        yield span
 
 
 def _extraer_json(texto: str) -> Dict[str, Any]:
@@ -329,42 +473,252 @@ def _revisar_cuadre(gasto: Gasto) -> Dict[str, Any]:
     return resultado
 
 
-def _analizar(contenido: bytes, mime_type: str) -> Analisis:
-    cliente, modelo, _ = _cliente()
-    imagen_b64 = base64.b64encode(contenido).decode()
+def _tipo_error_modelo(exc: BaseException) -> Tuple[str, Optional[int]]:
+    """Traduce la excepcion del SDK a un `error.type` corto y estable."""
+    import openai
 
-    respuesta = cliente.chat.completions.create(
-        model=modelo,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": PROMPT},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{imagen_b64}"},
-                    },
-                ],
-            }
-        ],
-        max_tokens=1500,
-        # Extraer datos no es creativo: la variabilidad aquí es ruido que rompe
-        # la reproducibilidad de las evaluaciones.
-        temperature=0,
+    codigo = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(exc, openai.APITimeoutError):
+        return "timeout", codigo
+    if isinstance(exc, openai.RateLimitError):
+        return "rate_limited", codigo or 429
+    if isinstance(exc, openai.APIConnectionError):
+        return "connection_error", codigo
+    if isinstance(exc, openai.APIStatusError):
+        codigo = codigo or getattr(exc, "status_code", None)
+        if codigo and 500 <= codigo < 600:
+            return "http_5xx", codigo
+        if codigo and 400 <= codigo < 500:
+            return "http_4xx", codigo
+    return "model_error", codigo
+
+
+_ERRORES_REINTENTABLES = ("timeout", "rate_limited", "connection_error", "http_5xx")
+
+
+def _invocar_modelo(cliente, modelo: str, imagen_b64: str, mime_type: str):
+    with _span_llamada_modelo(modelo) as span_llm:
+        respuesta = cliente.chat.completions.create(
+            model=modelo,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{imagen_b64}"},
+                        },
+                    ],
+                }
+            ],
+            max_tokens=1500,
+            # Extraer datos no es creativo: la variabilidad aquí es ruido que rompe
+            # la reproducibilidad de las evaluaciones.
+            temperature=0,
+        )
+        if span_llm is not None:
+            _anotar_respuesta_modelo(span_llm, respuesta)
+        return respuesta
+
+
+def _anotar_respuesta_modelo(span, respuesta) -> None:
+    """Atributos GenAI del lado respuesta. Solo si el span es nuestro."""
+    if span is None:
+        return
+    if getattr(respuesta, "model", None):
+        span.set_attribute("gen_ai.response.model", respuesta.model)
+    razones = [c.finish_reason for c in (respuesta.choices or []) if c.finish_reason]
+    if razones:
+        span.set_attribute("gen_ai.response.finish_reasons", razones)
+    uso = getattr(respuesta, "usage", None)
+    if uso:
+        span.set_attribute("gen_ai.usage.input_tokens", uso.prompt_tokens)
+        span.set_attribute("gen_ai.usage.output_tokens", uso.completion_tokens)
+        span.set_attribute("gen_ai.usage.total_tokens", uso.total_tokens)
+
+
+def _llamar_con_reintentos(contenido: bytes, mime_type: str, span_agente):
+    """Llama al modelo reintentando los fallos pasajeros y el JSON ilegible.
+
+    Cada intento genera su propio span de modelo — el auto-instrumentado si lo
+    hay — para que se vea dónde falló y no se pise el resultado del anterior.
+    El fallo de cada intento queda como evento `gen_ai.retry` en el span de
+    agente, que solo acaba en ERROR si se agotan los intentos.
+    """
+    cliente, modelo, _ = _cliente()
+    with obs.span_fase("app.document.preprocess", {
+        "expense.document.preprocess.applied": False,
+    }) as span_pre:
+        inicio = time.monotonic()
+        # TODO: no hay rotación, normalización de contraste, resize ni render de
+        # PDF. Cuando se añadan, van aquí como subspans app.image.* / app.pdf.render
+        # y hay que rellenar expense.document.preprocess.operations.
+        imagen_b64 = base64.b64encode(contenido).decode()
+        duracion_pre = time.monotonic() - inicio
+        span_pre.set_attribute("expense.document.preprocess.operations", [])
+    obs.metricas().duracion_preproceso.record(
+        duracion_pre, obs.etiquetas_base(modelo=modelo, mime_type=mime_type)
     )
 
-    crudo = respuesta.choices[0].message.content or ""
-    advertencias: List[str] = []
+    reintentos = 0
+    ultimo_error: Optional[str] = None
+    while True:
+        try:
+            respuesta = _invocar_modelo(cliente, modelo, imagen_b64, mime_type)
+        except Exception as exc:
+            tipo, codigo = _tipo_error_modelo(exc)
+            reintentable = tipo in _ERRORES_REINTENTABLES and reintentos + 1 < obs.CONFIG.max_intentos
+            span_agente.add_event(
+                "gen_ai.retry" if reintentable else "gen_ai.error",
+                obs._limpiar({
+                    "retry.attempt": reintentos + 1,
+                    "retry.reason": tipo,
+                    "error.type": tipo,
+                    "http.response.status_code": codigo,
+                }),
+            )
+            if not reintentable:
+                raise
+            reintentos += 1
+            ultimo_error = tipo
+            obs.metricas().reintentos.add(1, obs.etiquetas_base(modelo=modelo, mime_type=mime_type))
+            continue
+
+        crudo = respuesta.choices[0].message.content or ""
+        datos, json_valido = _fase_parse_json(crudo)
+        if json_valido or reintentos + 1 >= obs.CONFIG.max_intentos:
+            return respuesta, modelo, datos, json_valido, reintentos
+
+        # Reintento de reparación: mismo prompt, nueva llamada, span propio.
+        span_agente.add_event(
+            "gen_ai.retry",
+            {
+                "retry.attempt": reintentos + 1,
+                "retry.reason": "invalid_json",
+                "error.type": "json_parse_error",
+            },
+        )
+        reintentos += 1
+        ultimo_error = "json_parse_error"
+        obs.metricas().reintentos.add(1, obs.etiquetas_base(modelo=modelo, mime_type=mime_type))
+
+
+def _fase_parse_json(crudo: str) -> Tuple[Dict[str, Any], bool]:
+    """Fase `app.ocr.parse_json`. La salida cruda no se guarda como atributo."""
+    with obs.span_fase("app.ocr.parse_json", {"expense.ocr.output_length": len(crudo)}) as span:
+        try:
+            datos = _extraer_json(crudo)
+        except (json.JSONDecodeError, IndexError, ValueError) as exc:
+            span.add_event("expense.ocr.json_parse_failed")
+            span.set_attribute("expense.ocr.output_valid_json", False)
+            obs.marcar_error(span, "json_parse_error", exc)
+            return {}, False
+        if not isinstance(datos, dict):
+            span.add_event("expense.ocr.json_parse_failed")
+            span.set_attribute("expense.ocr.output_valid_json", False)
+            obs.marcar_error(span, "json_parse_error")
+            return {}, False
+        span.set_attribute("expense.ocr.output_valid_json", True)
+        return datos, True
+
+
+def _fase_validar_esquema(datos: Dict[str, Any], json_valido: bool, modelo: str,
+                          mime_type: str) -> Tuple[bool, List[str]]:
+    """Fase `app.ocr.validate_schema`. Solo salen nombres de regla, no valores."""
+    inicio = time.monotonic()
+    with obs.span_fase(
+        "app.ocr.validate_schema",
+        {"expense.ocr.schema_version": obs.CONFIG.version_esquema},
+    ) as span:
+        if not json_valido:
+            span.set_attribute("expense.ocr.output_schema_valid", False)
+            duracion = time.monotonic() - inicio
+            obs.metricas().duracion_validacion.record(
+                duracion, obs.etiquetas_base(modelo=modelo, mime_type=mime_type)
+            )
+            return False, []
+        valido, fallos = esquema.resumen_validacion(datos)
+        span.set_attribute("expense.ocr.output_schema_valid", valido)
+        if not valido:
+            span.set_attribute("expense.ocr.schema_failed_rules", fallos)
+            span.add_event("expense.ocr.schema_validation_failed", {"rules": fallos})
+            obs.marcar_error(span, "json_schema_validation_error")
+        duracion = time.monotonic() - inicio
+    obs.metricas().duracion_validacion.record(
+        duracion, obs.etiquetas_base(modelo=modelo, mime_type=mime_type)
+    )
+    return valido, fallos
+
+
+def _fase_calidad(datos: Dict[str, Any], gasto: "Gasto", legible: bool,
+                  json_valido: bool, esquema_valido: bool,
+                  advertencias: List[str]) -> Tuple[bool, str]:
+    """Fase `app.ocr.quality_check`. Reglas deterministas, sin confianza inventada.
+
+    No se estima ninguna puntuación de confianza: el modelo no la da y
+    fabricarla convertiría un dato inventado en una decisión de negocio.
+    """
+    with obs.span_fase("app.ocr.quality_check") as span:
+        if not json_valido:
+            motivo = obs.REVISION_JSON_INVALIDO
+        elif not esquema_valido:
+            motivo = obs.REVISION_ESQUEMA_INVALIDO
+        elif not legible:
+            motivo = obs.REVISION_ILEGIBLE
+        elif gasto.total is None:
+            motivo = obs.REVISION_SIN_TOTAL
+        else:
+            motivo = obs.REVISION_NINGUNA
+
+        requiere = motivo != obs.REVISION_NINGUNA
+        span.set_attributes({
+            "expense.ocr.legible": legible,
+            "expense.ocr.warning_count": len(advertencias),
+            "expense.ocr.review_required": requiere,
+            "expense.ocr.review_reason": motivo,
+        })
+        # TODO: `expense.ocr.confidence` solo cuando exista una fuente de
+        # confianza real y calibrada; el modelo actual no la devuelve.
+        return requiere, motivo
+
+
+def _construir_gasto(datos: Dict[str, Any]) -> "Gasto":
+    """Arma el gasto descartando los campos que el modelo devolvio mal tipados.
+
+    El esquema ya ha dejado constancia del incumplimiento en la traza; aqui lo
+    que toca es devolver lo que si se pudo leer, no tumbar la peticion entera
+    por un `total` que vino como texto.
+    """
+    campos = esquema.campos_del_gasto(datos, Gasto.model_fields)
     try:
-        datos = _extraer_json(crudo)
-    except (json.JSONDecodeError, IndexError):
+        return Gasto(**campos)
+    except ValidationError as exc:
+        for error in exc.errors():
+            loc = error.get("loc") or ()
+            if loc:
+                campos.pop(loc[0], None)
+    try:
+        return Gasto(**campos)
+    except ValidationError:
+        return Gasto()
+
+
+def _analizar(contenido: bytes, mime_type: str, span_agente) -> Tuple[Analisis, Dict[str, Any]]:
+    respuesta, modelo, datos, json_valido, reintentos = _llamar_con_reintentos(
+        contenido, mime_type, span_agente
+    )
+
+    advertencias: List[str] = []
+    if not json_valido:
         advertencias.append("el modelo no devolvió JSON válido")
-        datos = {}
+
+    esquema_valido, _fallos = _fase_validar_esquema(datos, json_valido, modelo, mime_type)
 
     legible = bool(datos.get("legible", True))
     advertencias.extend(datos.get("advertencias") or [])
 
-    gasto = Gasto(**{k: v for k, v in datos.items() if k in Gasto.model_fields})
+    gasto = _construir_gasto(datos)
 
     # Regla 10: si no se lee, se pide otra foto en vez de devolver datos a medias.
     if not legible:
@@ -404,7 +758,11 @@ def _analizar(contenido: bytes, mime_type: str) -> Analisis:
         else {}
     )
 
-    return Analisis(
+    revisar, motivo = _fase_calidad(
+        datos, gasto, legible, json_valido, esquema_valido, advertencias
+    )
+
+    analisis = Analisis(
         gasto=gasto,
         legible=legible,
         cuadre=cuadre,
@@ -413,76 +771,147 @@ def _analizar(contenido: bytes, mime_type: str) -> Analisis:
         tokens=tokens,
         registrado=False,
     )
+    diagnostico = {
+        "modelo": analisis.modelo,
+        "json_valido": json_valido,
+        "esquema_valido": esquema_valido,
+        "reintentos": reintentos,
+        "revisar": revisar,
+        "motivo": motivo,
+        "type_hint": esquema.type_hint(datos),
+        "finish_reasons": [c.finish_reason for c in (respuesta.choices or []) if c.finish_reason],
+    }
+    return analisis, diagnostico
 
 
-def _contexto_entrante(cabeceras: Optional[Dict[str, str]]):
-    """Continua la traza que venga en la cabecera `traceparent`, si la hay.
-
-    En el pod solo esta instrumentado `requests`: no hay instrumentacion de
-    FastAPI ni de ASGI, asi que nadie extrae el contexto W3C de la peticion
-    entrante y cada llamada abria una traza nueva. Extrayendolo aqui, el span
-    del agente cuelga de lo que haya iniciado el cliente y el recorrido
-    completo queda bajo un mismo trace id.
-    """
-    if not cabeceras:
-        return None
-    try:
-        from opentelemetry.propagate import extract
-        return extract({k.lower(): v for k, v in cabeceras.items()})
-    except Exception:
-        return None
-
-
-def _con_span_de_agente(contenido: bytes, mime_type: str,
-                        origen: str = "api", nombre: str = "",
-                        cabeceras: Optional[Dict[str, str]] = None) -> Analisis:
-    """Abre el span de agente que exige el contrato de instrumentación de AMP.
+def _analizar_justificante(contenido: bytes, mime_type: str,
+                           origen: str = "api",
+                           cabeceras: Optional[Dict[str, str]] = None) -> Analisis:
+    """Span raíz del agente: `invoke_agent ocr-agent`, con sus fases colgando.
 
     `gen_ai.operation.name` tiene que ser uno de los seis valores de la
     enumeración. Con cualquier otro, AMP no deriva el kind y el span queda mudo
     — sin icono, sin ficha de agente y sin evaluadores — y no avisa de nada.
     """
-    if not _OTEL:
-        return _analizar(contenido, mime_type)
+    cabeceras = {k.lower(): v for k, v in (cabeceras or {}).items()}
+    origen_norm = _origen_normalizado(origen)
+    inicio = time.monotonic()
 
-    tracer = trace.get_tracer(f"amp.{AGENT_NAME}")
-    with tracer.start_as_current_span(
-        "analizar_gasto",
-        context=_contexto_entrante(cabeceras),
-        attributes={
-            "gen_ai.operation.name": "invoke_agent",
-            "gen_ai.system": os.getenv("AMP_GENAI_SYSTEM", "openai"),
-            "gen_ai.agent.name": AGENT_NAME,
-            "traceloop.span.kind": "agent",
-            # De donde viene la imagen y como es. El SDK de Traceloop intenta
-            # subir el blob a /v2/traces/.../images, un endpoint de Traceloop
-            # Cloud que el gateway de AMP no implementa (404), asi que sin esto
-            # la traza no diria nada de la entrada. Van en el namespace amp.*
-            # porque no son claves del contrato semconv, solo atributos
-            # buscables.
-            "amp.entrada.origen": origen,
-            "amp.entrada.mime": mime_type,
-            "amp.entrada.bytes": len(contenido),
-            "amp.entrada.dimensiones": _dimensiones(contenido) or "desconocidas",
-            "amp.entrada.nombre": nombre or "(sin nombre)",
-        },
+    atributos = {
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.system": os.getenv("AMP_GENAI_SYSTEM", "openai"),
+        "gen_ai.agent.name": AGENT_NAME,
+        "gen_ai.agent.version": obs.CONFIG.version_agente,
+        "traceloop.span.kind": "agent",
+        "service.version": obs.CONFIG.version_servicio,
+        "deployment.environment.name": obs.CONFIG.entorno,
+        "expense.ocr.schema_version": obs.CONFIG.version_esquema,
+        "expense.document.source": origen_norm,
+        "expense.document.mime_type": (mime_type or "").split(";")[0].strip().lower(),
+        "expense.document.size_bytes": len(contenido),
+        "expense.document.id_hash": _hash_documento(cabeceras.get("x-document-id", "")),
+        # Solo se propaga un id de conversación que ya venga de fuera: fabricar
+        # uno aquí no correlacionaría nada, sería un uuid por petición.
+        "gen_ai.conversation.id": cabeceras.get("x-conversation-id") or None,
+    }
+
+    etiquetas = obs.etiquetas_base(mime_type=atributos["expense.document.mime_type"])
+    obs.metricas().peticiones.add(1, etiquetas)
+    obs.metricas().tamano_documento.record(len(contenido), etiquetas)
+
+    with obs.span_fase(
+        f"invoke_agent {AGENT_NAME}",
+        atributos,
+        contexto=obs.contexto_entrante(cabeceras),
     ) as span:
-        resultado = _analizar(contenido, mime_type)
-        # Los evaluadores de nivel agente leen estos dos atributos. Sin ellos el
-        # monitor se ejecuta pero no tiene nada que puntuar.
-        span.set_attribute(
-            "gen_ai.input.messages",
-            json.dumps([{"role": "user", "content": "[imagen de justificante de gasto]"}]),
-        )
-        span.set_attribute(
-            "gen_ai.output.messages",
-            json.dumps([{"role": "assistant", "content": resultado.gasto.model_dump_json()}]),
-        )
-        span.set_attribute("gen_ai.request.model", resultado.modelo)
-        if resultado.tokens:
-            span.set_attribute("gen_ai.usage.input_tokens", resultado.tokens["entrada"])
-            span.set_attribute("gen_ai.usage.output_tokens", resultado.tokens["salida"])
-        return resultado
+        try:
+            with obs.span_fase("app.document.validate") as span_val:
+                try:
+                    documento = _validar_documento(contenido, mime_type)
+                except ErrorDocumento as exc:
+                    obs.marcar_error(span_val, exc.error_type, exc)
+                    raise
+                span_val.set_attributes(obs._limpiar({
+                    "expense.document.image.width": documento["width"],
+                    "expense.document.image.height": documento["height"],
+                    "expense.document.image.orientation": documento["orientation"],
+                    "expense.document.page_count": documento["page_count"],
+                }))
+
+            span.set_attributes(obs._limpiar({
+                "expense.document.image.width": documento["width"],
+                "expense.document.image.height": documento["height"],
+                "expense.document.image.orientation": documento["orientation"],
+                "expense.document.page_count": documento["page_count"],
+            }))
+            # TODO: no hay fase app.document.store; el justificante no se
+            # persiste en ningún backend. Al añadirlo, instrumentar aquí con
+            # `expense.document.store.backend` enumerado (s3 | filesystem | blob).
+
+            analisis, diag = _analizar(contenido, mime_type, span)
+
+            span.set_attributes({
+                "gen_ai.request.model": analisis.modelo,
+                "expense.document.type_hint": diag["type_hint"],
+                "expense.ocr.output_valid_json": diag["json_valido"],
+                "expense.ocr.output_schema_valid": diag["esquema_valido"],
+                "expense.ocr.legible": analisis.legible,
+                "expense.ocr.warning_count": len(analisis.advertencias),
+                "expense.ocr.retry_count": diag["reintentos"],
+                "expense.ocr.review_required": diag["revisar"],
+                "expense.ocr.review_reason": diag["motivo"],
+            })
+            if diag["finish_reasons"]:
+                span.set_attribute("gen_ai.response.finish_reasons", diag["finish_reasons"])
+            if analisis.tokens:
+                span.set_attributes({
+                    "gen_ai.usage.input_tokens": analisis.tokens["entrada"],
+                    "gen_ai.usage.output_tokens": analisis.tokens["salida"],
+                    "gen_ai.usage.total_tokens": analisis.tokens["total"],
+                })
+            # Los evaluadores de AMP leen estos dos atributos. El redactor
+            # decide qué sale de ellos según OTEL_GENAI_CAPTURE_CONTENT.
+            span.set_attribute(
+                "gen_ai.input.messages",
+                json.dumps([{"role": "user", "content": "[imagen de justificante de gasto]"}]),
+            )
+            span.set_attribute(
+                "gen_ai.output.messages",
+                json.dumps([{"role": "assistant", "content": analisis.gasto.model_dump_json()}]),
+            )
+
+            etiquetas_fin = obs.etiquetas_base(
+                modelo=analisis.modelo,
+                mime_type=documento["mime_type"],
+                type_hint=diag["type_hint"],
+            )
+            resultado = "review" if diag["revisar"] else "success"
+            obs.metricas().exitos.add(1, dict(etiquetas_fin, result=resultado))
+            if diag["revisar"]:
+                obs.metricas().revisiones.add(
+                    1, dict(etiquetas_fin, **{"error.type": diag["motivo"]})
+                )
+            logger.info(
+                "analisis completado ocr_result_status=%s review_required=%s retries=%s",
+                resultado, diag["revisar"], diag["reintentos"],
+            )
+            return analisis
+
+        except ErrorDocumento as exc:
+            obs.marcar_error(span, exc.error_type, exc)
+            obs.metricas().fallos.add(1, dict(etiquetas, **{"error.type": exc.error_type}))
+            logger.warning("documento rechazado error.type=%s", exc.error_type)
+            raise
+        except Exception as exc:
+            tipo, codigo = _tipo_error_modelo(exc)
+            obs.marcar_error(span, tipo, exc, obs._limpiar({"http.response.status_code": codigo}))
+            span.set_attribute("expense.ocr.review_required", True)
+            span.set_attribute("expense.ocr.review_reason", obs.REVISION_ERROR_MODELO)
+            obs.metricas().fallos.add(1, dict(etiquetas, **{"error.type": tipo}))
+            logger.error("fallo el analisis error.type=%s", tipo)
+            raise
+        finally:
+            obs.metricas().duracion_agente.record(time.monotonic() - inicio, etiquetas)
 
 
 # -------------------------------------------------------------------- endpoints
@@ -509,14 +938,7 @@ def analizar(peticion: PeticionBase64, request: Request) -> Analisis:
         contenido = base64.b64decode(peticion.imagen_base64)
     except Exception:
         raise HTTPException(status_code=400, detail="imagen_base64 no es base64 valido")
-    try:
-        return _con_span_de_agente(contenido, peticion.mime_type, peticion.origen,
-                                   cabeceras=dict(request.headers))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("fallo el analisis")
-        raise HTTPException(status_code=502, detail=f"error llamando al gateway: {exc}")
+    return _responder_analisis(contenido, peticion.mime_type, peticion.origen, request)
 
 
 @app.post("/gastos/analizar/fichero", response_model=Analisis)
@@ -531,10 +953,16 @@ async def analizar_fichero(
     cambia el analisis: queda en la traza para poder distinguirlos despues.
     """
     contenido = await fichero.read()
+    return _responder_analisis(contenido, fichero.content_type or "image/jpeg", origen, request)
+
+
+def _responder_analisis(contenido: bytes, mime_type: str, origen: str,
+                        request: Request) -> Analisis:
+    """Traduce el resultado del agente a la respuesta HTTP, sin filtrar detalles."""
     try:
-        return _con_span_de_agente(contenido, fichero.content_type or "image/jpeg",
-                                   origen, fichero.filename or "",
-                                   cabeceras=dict(request.headers))
+        return _analizar_justificante(contenido, mime_type, origen, dict(request.headers))
+    except ErrorDocumento as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.mensaje)
     except HTTPException:
         raise
     except Exception as exc:
@@ -563,7 +991,15 @@ def registrar(peticion: PeticionRegistro) -> Dict[str, Any]:
 
     # Aquí iría la integración con el sistema de gastos. En la demo se deja
     # explícito que no hay destino real, en vez de fingir un alta.
-    logger.info("registro confirmado: %s", peticion.gasto.model_dump_json())
+    with obs.span_fase("app.expense.persist", {
+        "expense.persist.backend": "none",
+        "expense.persist.operation": "create",
+    }) as span:
+        # TODO: al conectar el sistema de gastos, poner el backend real
+        # (postgres | mysql | api) y result=success|failure. Nunca el id del
+        # gasto, el comercio ni los importes.
+        span.set_attribute("expense.persist.result", "skipped")
+    logger.info("registro confirmado sin backend conectado")
     return {
         "registrado": False,
         "requiere_confirmacion": False,

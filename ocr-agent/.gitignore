@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 .env
 # Las capturas y fotos sueltas no, pero los dos tickets sinteticos si: son

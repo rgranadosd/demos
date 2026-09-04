@@ -229,14 +229,19 @@ que el modelo no iba a confesar**.
 
 ## Qué queda trazado
 
-El span de agente lleva, además de los tokens y el contenido, de dónde viene la
-imagen y cómo es:
+El span de agente lleva, además de los tokens, de dónde viene la imagen y cómo
+es. En el namespace `expense.document.*`, todo categórico o numérico:
 
-    amp.entrada.origen        camara | fichero | cli | api
-    amp.entrada.mime          image/jpeg
-    amp.entrada.dimensiones   1920x1080
-    amp.entrada.bytes         184320
-    amp.entrada.nombre        captura-114240.jpg
+    expense.document.source             api | upload | camera | cli | email
+    expense.document.mime_type          image/jpeg
+    expense.document.size_bytes         184320
+    expense.document.image.width        1920
+    expense.document.image.height       1080
+    expense.document.image.orientation  landscape
+
+El nombre del fichero **ya no se registra**: `captura-114240.jpg` es inocuo,
+pero `factura-acme-marzo.jpg` no, y no hay forma de distinguirlos en tiempo de
+ejecución.
 
 Hace falta ponerlo a mano porque el SDK de Traceloop intenta subir la imagen a
 `/v2/traces/{trace}/spans/{span}/images`, un endpoint de Traceloop Cloud que el
@@ -259,10 +264,10 @@ cuando una extracción sale mal.
 ## Seguir la traza desde el cliente
 
 El servidor genera un contexto W3C por peticion y lo manda en la cabecera
-`traceparent`. El agente lo extrae y cuelga `analizar_gasto` de ahi en vez de
-abrir una traza nueva, de modo que navegador, proxy, gateway y agente comparten
-un unico trace id. La ficha del resultado lo muestra al pie, listo para
-copiarlo y buscarlo en Agent Manager.
+`traceparent`. El agente lo extrae y cuelga `invoke_agent ocr-agent` de ahi en
+vez de abrir una traza nueva, de modo que navegador, proxy, gateway y agente
+comparten un unico trace id. La ficha del resultado lo muestra al pie, listo
+para copiarlo y buscarlo en Agent Manager.
 
 Hay que extraerlo a mano: en el pod solo esta instrumentado `requests`, no hay
 instrumentacion de FastAPI ni de ASGI, asi que nadie leia la cabecera entrante.
@@ -271,6 +276,184 @@ instrumentacion de FastAPI ni de ASGI, asi que nadie leia la cabecera entrante.
 tendria que exportar sus spans a `/otel/v1/traces`, que exige la credencial de
 agente (`AMP_AGENT_API_KEY`) — un cliente externo no deberia llevarla encima.
 Lo que se comparte es el identificador, no los spans del cliente.
+
+## Observabilidad
+
+El objetivo es poder responder, **sin abrir el prompt ni la respuesta**: qué
+modelo se usó, cuánto tardó cada fase, cuántos tokens costó, si el JSON y el
+esquema fueron válidos, si el justificante necesita revisión humana, si hubo
+reintentos y dónde falló.
+
+El agente **no configura OpenTelemetry**. El tracer provider, el propagador y el
+exporter los instala el `sitecustomize` de AMP; `observabilidad.py` solo los
+toma del API global. Montar un segundo provider partiría las trazas en dos.
+
+### Árbol de spans
+
+```
+POST /gastos/analizar                     (si hay instrumentación HTTP)
+└─ invoke_agent ocr-agent                 gen_ai.operation.name = invoke_agent
+   ├─ app.document.validate               mime, tamaño, firma, dimensiones
+   ├─ app.document.preprocess             hoy solo el encode; sin rotar ni escalar
+   ├─ chat <modelo>                       uno por intento
+   ├─ app.ocr.parse_json
+   ├─ app.ocr.validate_schema             contra expense-v1
+   └─ app.ocr.quality_check               decide review_required
+```
+
+Y en `/gastos/registrar` con `confirmado: true`, un `app.expense.persist`.
+
+`chat <modelo>` **solo se crea si nadie más lo está creando**. Cuando la
+instrumentación automática de AMP está cargada, ya emite su propio
+`openai.chat` y envolverlo en otro span de cliente sería duplicar la misma
+semántica. La detección mira si el módulo está en `sys.modules`, no si
+`Completions.create` tiene `__wrapped__`: el propio SDK de OpenAI decora ese
+método con `functools.wraps`, así que ese atributo está siempre y el falso
+positivo dejaba la llamada al modelo **sin ningún span**.
+
+No hay `app.document.store`: el justificante no se persiste en ningún sitio. Se
+deja el TODO en el código en vez de inventar una fase que no existe.
+
+### Variables de entorno
+
+| Variable | Por defecto | Para qué |
+|---|---|---|
+| `OTEL_GENAI_CAPTURE_CONTENT` | `none` | `none` \| `redacted` \| `full` |
+| `OTEL_ENVIRONMENT` | `development` | Va a `deployment.environment.name` |
+| `OTEL_SERVICE_VERSION` | `unknown` | Release o commit SHA |
+| `OCR_AGENT_WORKFLOW_VERSION` | la de servicio | `gen_ai.agent.version` |
+| `EXPENSE_OCR_SCHEMA_VERSION` | `expense-v1` | Versión del contrato validado |
+| `EXPENSE_OCR_MAX_ATTEMPTS` | `2` | Intentos totales al modelo |
+| `EXPENSE_OCR_MAX_BYTES` | `10485760` | Rechazo por tamaño (413) |
+| `EXPENSE_OCR_ID_SALT` | — | Sin ella no se emite `expense.document.id_hash` |
+| `EXPENSE_OCR_REVIEW_CONFIDENCE_THRESHOLD` | — | Reservada; hoy no hay confianza real que umbralizar |
+
+### Captura de contenido, por entorno
+
+| Nivel | `gen_ai.input/output.messages` | Prompt crudo del SDK | Imagen |
+|---|---|---|---|
+| `none` | se eliminan | se elimina | **nunca** |
+| `redacted` | se conservan, con el PII enmascarado | se elimina | **nunca** |
+| `full` | tal cual | tal cual | **nunca** |
+
+- **Local:** `full` si necesitas ver el prompt.
+- **Staging y producción:** `redacted`. Los evaluadores de nivel agente de AMP
+  leen `gen_ai.input.messages` y `gen_ai.output.messages`; con `none` el monitor
+  se ejecuta pero no tiene nada que puntuar. En `redacted` reciben la estructura,
+  los importes y el `tipo_documento` — que es lo que puntúan — mientras
+  `comercio`, `resumen`, `fecha` y las descripciones de línea salen como
+  `[redactado]`. El enmascarado baja también por el JSON anidado dentro de
+  `content`, que es donde está de verdad el comercio.
+
+La imagen en base64 no sale **en ningún nivel**, ni siquiera en `full`: `full`
+es para depurar el prompt, no para volcar el justificante en la traza.
+
+Como un `SpanProcessor` no puede modificar un span ya cerrado, la redacción se
+hace en el último punto posible: envolviendo los exporters que AMP ya registró.
+Si el provider no es el del SDK y no hay nada que envolver, el log de arranque
+lo dice (`no se encontro ningun exporter que envolver`) en vez de fingir que la
+política está aplicada. **Si ves eso en los logs del pod, la privacidad no está
+garantizada y hay que mirarlo.**
+
+Nunca se indexan: imagen o base64, prompt completo, respuesta completa, nombre
+original del fichero, comercio, resumen, líneas, fechas ni importes.
+
+### Atributos `expense.*`
+
+| Atributo | Valores |
+|---|---|
+| `expense.ocr.schema_version` | `expense-v1` |
+| `expense.ocr.output_valid_json` | bool |
+| `expense.ocr.output_schema_valid` | bool |
+| `expense.ocr.schema_failed_rules` | códigos de regla, nunca valores del documento |
+| `expense.ocr.legible` | bool |
+| `expense.ocr.warning_count` | entero (el recuento, no el texto) |
+| `expense.ocr.retry_count` | entero |
+| `expense.ocr.review_required` | bool |
+| `expense.ocr.review_reason` | `none` \| `invalid_json` \| `schema_invalid` \| `illegible` \| `missing_total` \| `model_error` \| `low_confidence` |
+| `expense.document.mime_type` | enum de `MIMES_ACEPTADOS` |
+| `expense.document.size_bytes` | entero |
+| `expense.document.page_count` | entero |
+| `expense.document.source` | `api` \| `upload` \| `camera` \| `cli` \| `email` \| `unknown` |
+| `expense.document.image.width` / `.height` | entero |
+| `expense.document.image.orientation` | `portrait` \| `landscape` \| `unknown` |
+| `expense.document.type_hint` | `ticket` \| `factura` \| `recibo` \| `otro` \| `unknown` |
+| `expense.document.id_hash` | HMAC-SHA256 truncado; solo con `EXPENSE_OCR_ID_SALT` |
+| `expense.persist.backend` / `.operation` / `.result` | enums |
+
+`expense.ocr.confidence` **no se emite**: el modelo no devuelve una confianza
+calibrada y fabricarla convertiría un número inventado en una decisión de
+negocio.
+
+### Errores
+
+Todo fallo no recuperable deja las tres cosas a la vez — excepción registrada,
+span status `ERROR` y `error.type` — porque quien consulta las trazas filtra por
+el estado estándar de OTel, no por un booleano propio. Valores de `error.type`:
+`unsupported_media_type`, `file_too_large`, `invalid_image`, `corrupt_file`,
+`json_parse_error`, `json_schema_validation_error`, `timeout`, `rate_limited`,
+`connection_error`, `http_4xx`, `http_5xx`, `model_error`.
+
+Los reintentos dejan un evento `gen_ai.retry` en el span de agente con
+`retry.attempt`, `retry.reason`, `error.type` y `http.response.status_code`. Si
+el resultado final fue correcto, **la raíz no se marca en ERROR**: el fallo se
+ve en el intento, no en el conjunto.
+
+### Métricas
+
+Histogramas `expense.ocr.document.size` (`By`), `expense.ocr.agent.duration`
+(`s`), `expense.ocr.preprocess.duration` (`s`), `expense.ocr.validation.duration`
+(`s`). Contadores `expense.ocr.requests`, `.successes`, `.failures`,
+`.review_required`, `.retries`. Etiquetas: `model`, `document.mime_type`,
+`document.type_hint`, `environment`, `result`, y `error.type` solo en las de
+error. Nunca document id, user id, comercio, importe, fecha ni request id.
+
+### Consultas útiles
+
+```
+# Justificantes que necesitan revisión humana, por motivo
+span.name = "invoke_agent ocr-agent" AND expense.ocr.review_required = true
+  | stats count() by expense.ocr.review_reason
+
+# ¿El modelo está devolviendo JSON roto?
+expense.ocr.output_valid_json = false | stats count() by gen_ai.request.model
+
+# Coste por tipo de documento
+span.name = "invoke_agent ocr-agent"
+  | stats sum(gen_ai.usage.total_tokens) by expense.document.type_hint
+
+# Dónde se va el tiempo
+span.name IN ("app.document.preprocess", "chat*", "app.ocr.validate_schema")
+  | stats p95(duration) by span.name
+
+# Reintentos y su causa
+event.name = "gen_ai.retry" | stats count() by retry.reason
+```
+
+### Sampling
+
+Se respeta el sampler que venga configurado; el agente no implementa el suyo.
+Lo que hay que pedirle al collector, porque es donde se hace bien:
+
+- 100% de las trazas con error.
+- 100% de las trazas con `expense.ocr.review_required = true` — son las que
+  alguien va a auditar a mano.
+- Una muestra configurable de los éxitos.
+
+Tail sampling dentro de la aplicación no: la app no ve la traza completa y la
+plataforma sí.
+
+### Pruebas
+
+```bash
+./.venv/bin/pip install -r requirements-dev.txt
+./.venv/bin/python -m pytest tests -q
+```
+
+`requirements-dev.txt` **no va al buildpack**: en el pod, el SDK de
+OpenTelemetry lo inyecta AMP. Los tests cubren documento inválido, respuesta
+válida, JSON roto, esquema inválido, ilegible, reintento seguido de éxito, error
+no reintentable, y que en producción no se exportan mensajes, base64 ni PII.
 
 ## Notas de despliegue
 
@@ -283,3 +466,6 @@ Lo que se comparte es el identificador, no los spans del cliente.
   mensajes de entrada/salida, que es lo que el contrato exige para que AMP
   derive el `kind` y aplique los evaluadores. Con cualquier otro valor el span
   queda mudo **y no avisa**.
+- Variables a poner en el componente de Agent Manager:
+  `OTEL_GENAI_CAPTURE_CONTENT=redacted`, `OTEL_ENVIRONMENT=production`,
+  `OTEL_SERVICE_VERSION=<release>`, `EXPENSE_OCR_SCHEMA_VERSION=expense-v1`.

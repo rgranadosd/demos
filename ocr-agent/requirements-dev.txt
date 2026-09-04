@@ -1,0 +1,6 @@
+# Solo para ejecutar los tests en local. NO va al buildpack de Agent Manager:
+# en el pod, el SDK de OpenTelemetry lo inyecta el sitecustomize de AMP.
+-r requirements.txt
+pytest>=8.0
+opentelemetry-api>=1.25
+opentelemetry-sdk>=1.25
