@@ -501,9 +501,20 @@ const MARCO = {x: 0.18, y: 0.08, w: 0.64, h: 0.84};   // igual que el .guia del 
 // escenas sintéticas: ticket 53% claros / 8,95 detalle · mesa blanca vacía
 // 100% / 0,17 · habitación con objetos 0% / 3,20 · escena oscura 0% / 0,00.
 // Ninguna métrica sola distingue; las dos juntas, sí.
-const CLAROS_MIN    = 0.25;  // al menos un cuarto del marco es superficie clara
-const UMBRAL_CLARO  = 170;   // nivel de gris a partir del cual cuenta como claro
-const NITIDEZ_MIN   = 2.5;   // suelo absoluto: evita disparar sobre una pared
+// El umbral de "claro" NO puede ser un nivel de gris fijo: con luz cálida o
+// exposición baja, un ticket blanco no llega a 170 y la detección no dispara
+// nunca. Se calcula sobre el brillo máximo del propio marco, así que se adapta
+// a la exposición de cada cámara y cada sala.
+const CLAROS_MIN    = 0.20;  // un quinto del marco ha de ser la zona más clara
+const FRACCION_LUZ  = 0.75;  // "claro" = por encima del 75% del brillo máximo
+const BRILLO_MIN    = 90;    // suelo: por debajo, la escena está a oscuras
+// Que sea claro no basta, y que haya detalle en el fotograma tampoco: un techo
+// iluminado da 50% de claros y 3,6 de detalle porque el detalle viene de los
+// muebles oscuros de abajo. Lo que distingue un papel impreso es que el detalle
+// esté DENTRO de la zona clara: ahí es donde está el texto.
+// Medido: techo 1,07 · mesa blanca 0,00 · ticket tenue 3,71 · ticket 9,77.
+const DETALLE_MIN   = 2.5;
+const NITIDEZ_MIN   = DETALLE_MIN;  // el enfoque se mide con la misma señal
 const FRACCION_MEJOR= 0.65;  // hay que llegar al 65% del mejor enfoque visto
 const ESTABLES      = 4;     // ~0,8 s seguidos en verde antes de disparar
 const CALENTAMIENTO = 6;     // muestras CON papel antes de permitir disparo
@@ -547,18 +558,23 @@ function medir() {
   lienzoMuestra.width = w; lienzoMuestra.height = h;
   const g = grises(w, h);
 
-  let suma = 0, n = 0;
+  let maximo = 0;
+  for (let i = 0; i < g.length; i++) if (g[i] > maximo) maximo = g[i];
+  const corte = Math.max(BRILLO_MIN, maximo * FRACCION_LUZ);
+
+  // Un solo recorrido: cuenta los píxeles claros y acumula el laplaciano solo
+  // sobre ellos. El detalle de la zona clara es la señal que delata el texto.
+  let claros = 0, suma = 0, n = 0;
   for (let y = 1; y < h - 1; y++)
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
+      if (g[i] < corte) continue;
+      claros++;
       suma += Math.abs(4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]);
       n++;
     }
-  const nitidez = suma / n;
-
-  let claros = 0;
-  for (let i = 0; i < g.length; i++) if (g[i] > UMBRAL_CLARO) claros++;
-  claros /= g.length;
+  const nitidez = n ? suma / n : 0;        // detalle DENTRO de lo claro
+  claros /= (w - 2) * (h - 2);
 
   let mov = 0;
   if (previo && previo.length === g.length) {
@@ -575,7 +591,9 @@ function medir() {
 function tick() {
   const m = medir();
   if (!m) return;
-  const hayPapel = m.claros >= CLAROS_MIN;
+  // Claro Y con detalle: lo primero descarta una habitación en penumbra, lo
+  // segundo una mesa o pared lisa.
+  const hayPapel = m.claros >= CLAROS_MIN && m.nitidez >= DETALLE_MIN;
 
   // El calibrado del enfoque SOLO corre cuando hay papel delante. Antes se
   // calibraba con la escena vacía, así que una habitación enfocada fijaba el

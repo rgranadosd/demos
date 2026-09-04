@@ -92,11 +92,19 @@ unos 0,8 s enfocada y quieta. La barra de abajo muestra el nivel y el estado
 pasa por delante: dispara al momento y corta el automático.
 
 Antes de mirar el enfoque comprueba que **hay un ticket delante**, midiendo
-solo dentro del marco guía. Un ticket es lo único que es *claro* **y** tiene
-*detalle* a la vez: medido sobre escenas sintéticas, ticket 53% de superficie
-clara y 8,95 de detalle, mesa blanca vacía 100% y 0,17, habitación con objetos
-0% y 3,20, escena oscura 0% y 0,00. Ninguna métrica sola distingue; las dos
-juntas, sí.
+solo dentro del marco guía. Dos señales, y las dos importan:
+
+- **Claros**: fracción de píxeles por encima del 75% del brillo máximo del
+  marco. Relativo a propósito — con un umbral de gris fijo, un ticket blanco
+  bajo luz cálida daba 0% y la captura no saltaba nunca.
+- **Detalle dentro de esa zona clara**: el laplaciano medido *solo* sobre los
+  píxeles claros. Es lo que delata el texto impreso.
+
+Lo segundo es la clave. Medir el detalle de todo el fotograma no vale: un techo
+iluminado da 50% de claros y 3,6 de detalle, porque ese detalle viene de los
+muebles oscuros de abajo. Restringido a la zona clara, la diferencia es nítida
+— techo 1,07 · mesa blanca 0,00 · ticket tenue 3,71 · ticket normal 9,77. Un
+factor 3,5 entre el peor ticket y el mejor falso positivo.
 
 Esto importa porque sin ello el disparador saltaba a los dos segundos de abrir
 la cámara: una habitación enfocada y quieta cumple «nítido y quieto» a la
