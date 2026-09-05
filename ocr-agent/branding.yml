@@ -1,0 +1,24 @@
+# Branding del cliente para la pantalla de login de ThunderID.
+#
+# Este fichero es la fuente declarativa del branding. El despliegue de ThunderID
+# debe copiar los assets a su frontend y convertir esta seccion en gate-config.js.
+# No se usan URLs remotas en el Gate en produccion: se descargan y versionan los
+# assets dentro de la imagen/configuracion de ThunderID.
+brand:
+  product_name: Telxius
+  logo:
+    light: assets/images/telxius-logo.svg
+    dark: assets/images/telxius-logo.svg
+    source: https://upload.wikimedia.org/wikipedia/commons/5/58/Telxius_logo.svg
+  favicon:
+    light: assets/images/telxius-logo.svg
+    dark: assets/images/telxius-logo.svg
+    source: https://upload.wikimedia.org/wikipedia/commons/5/58/Telxius_logo.svg
+
+# Salida esperada en gate-config.js de ThunderID.
+gate_config:
+  brand:
+    product_name: Telxius
+    favicon:
+      light: assets/images/telxius-logo.svg
+      dark: assets/images/telxius-logo.svg

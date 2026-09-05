@@ -166,6 +166,7 @@
     <div class="sub" id="destino">cargando…</div>
   </div>
   <div class="chip" id="credencial">…</div>
+  <a class="chip" id="sesion" href="/login" style="display:none;text-decoration:none"></a>
 </header>
 
 <main>
@@ -218,6 +219,20 @@ fetch('/api/config').then(r => r.json()).then(c => {
   const chip = $('#credencial');
   chip.textContent = c.con_credencial ? 'X-API-Key ✓' : 'sin credencial';
   chip.className = 'chip ' + (c.con_credencial ? 'on' : 'off');
+
+  const sesion = $('#sesion');
+  if (!c.login_activo) return;
+  sesion.style.display = '';
+  if (c.usuario) {
+    // El token no llega al navegador: solo el nombre para saber quien firma.
+    sesion.textContent = 'Cerrar sesión · ' + c.usuario.nombre;
+    sesion.href = '/logout';
+    sesion.className = 'chip on';
+  } else {
+    sesion.textContent = 'Sesión requerida';
+    sesion.href = '/login';
+    sesion.className = 'chip off';
+  }
 }).catch(() => {});
 
 let origenElegido = 'fichero';   // arrastrar, pegar o escoger fichero
