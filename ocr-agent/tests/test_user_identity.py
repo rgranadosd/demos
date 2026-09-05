@@ -100,10 +100,19 @@ def test_token_valido_da_el_usuario():
     assert attrs["user.id"] == USER_ID
     assert attrs["auth.delegation"] is True
     assert attrs["auth.source"] == "obo_token"
-    # El email y el username vienen en el token y NO deben salir en la traza.
+    # Por defecto, los datos de perfil no salen en la traza.
     volcado = json.dumps(attrs)
     assert "rafa@example.com" not in volcado
     assert "rafa" not in volcado
+
+
+def test_pii_de_usuario_requiere_opt_in(monkeypatch):
+    monkeypatch.setenv("OTEL_CAPTURE_USER_PII", "true")
+
+    attrs = ui.identidad_usuario(_cabeceras(_token())).atributos()
+
+    assert attrs["user.username"] == "rafa"
+    assert attrs["user.email"] == "rafa@example.com"
 
 
 def test_sin_token_el_analisis_sigue():

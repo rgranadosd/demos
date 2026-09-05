@@ -48,15 +48,17 @@ class TokenDeUsuarioInvalido(Exception):
 
 @dataclass(frozen=True)
 class IdentidadUsuario:
-    """El `sub` del token de usuario. Nada mas.
+    """El `sub` del token y, solo con opt-in, sus datos de perfil.
 
-    No se publican `email`, `username` ni `name` aunque vengan en el token: son
-    PII y la traza no es sitio para ellos. El `sub` de ThunderID ya es un
-    identificador opaco, asi que no hace falta seudonimizarlo encima.
+    `email` y `username` son PII: por defecto no salen de la aplicación. El
+    `sub` de ThunderID ya es un identificador opaco, así que no hace falta
+    seudonimizarlo encima.
     """
 
     user_id: Optional[str]
     issuer: Optional[str]
+    username: Optional[str] = None
+    email: Optional[str] = None
 
     @property
     def presente(self) -> bool:
@@ -65,14 +67,26 @@ class IdentidadUsuario:
     def atributos(self) -> Dict[str, Any]:
         if not self.presente:
             return {}
-        return {
+        atributos = {
             "user.id": self.user_id,
             "auth.delegation": True,
             "auth.source": ORIGEN_TOKEN_USUARIO,
         }
+        if _capturar_pii_usuario():
+            if self.username:
+                atributos["user.username"] = self.username
+            if self.email:
+                atributos["user.email"] = self.email
+        return atributos
 
 
 SIN_USUARIO = IdentidadUsuario(None, None)
+
+
+def _capturar_pii_usuario() -> bool:
+    return os.getenv("OTEL_CAPTURE_USER_PII", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
 
 
 def _jwks_uri() -> str:
@@ -213,4 +227,9 @@ def identidad_usuario(cabeceras: Optional[Dict[str, str]]) -> IdentidadUsuario:
         }.get(type(exc).__name__, "invalid_user_token")
         raise TokenDeUsuarioInvalido(tipo, f"token de usuario rechazado ({tipo})")
 
-    return IdentidadUsuario(user_id=str(claims["sub"]), issuer=claims.get("iss"))
+    return IdentidadUsuario(
+        user_id=str(claims["sub"]),
+        issuer=claims.get("iss"),
+        username=claims.get("username") or claims.get("preferred_username"),
+        email=claims.get("email"),
+    )
