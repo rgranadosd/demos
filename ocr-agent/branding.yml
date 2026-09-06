@@ -22,3 +22,12 @@ gate_config:
     favicon:
       light: assets/images/telxius-logo.svg
       dark: assets/images/telxius-logo.svg
+
+# Logo exclusivo del cliente OAuth OCR Chat. El Gate global mantiene Telxius;
+# este se muestra en el bloque "Application logo" de la pantalla de login.
+application:
+  name: OCR Chat
+  logo:
+    path: branding/assets/images/ocr-app-logo.png
+    login_asset: branding/assets/images/ocr-app-logo-small.png
+    gate_url: /gate/assets/images/ocr-app-logo-small.png

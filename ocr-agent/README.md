@@ -543,8 +543,11 @@ El branding de ThunderID tiene dos capas:
 
 - **Gate global:** `Telxius` y el favicon se configuran en `gate-config.js`.
 - **Application:** `OCR Chat.logoUrl` apunta a
-  `/gate/assets/images/logo.svg`, para que el bloque `Application logo` de la
-  pantalla de identificación no aparezca roto.
+  `/gate/assets/images/ocr-app-logo-small.png`, para que el bloque
+  `Application logo` de la pantalla de identificación muestre la identidad del
+  producto y no aparezca roto. El PNG original se conserva como
+  `ocr-app-logo.png`; la variante de 256×170 px se monta en el Gate para no
+  superar el límite de tamaño de ConfigMap de Kubernetes.
 
 [branding.yml](branding.yml) y
 [branding/assets/images/telxius-logo.svg](branding/assets/images/telxius-logo.svg)
