@@ -32,7 +32,9 @@ except ImportError:  # pragma: no cover - sin PyJWT no se puede verificar nada
     _JWT = False
 
 ACTOR_AGENTE = "agent"
-ORIGEN_TOKEN_USUARIO = "obo_token"
+# El BFF recibe un authorization-code token de la Application OCR Chat. No es
+# OBO: no hay token exchange ni consentimiento de delegacion todavia.
+ORIGEN_TOKEN_USUARIO = "user_token"
 _TIEMPO_ESPERA = 5.0
 _TTL_JWKS = 3600
 
@@ -69,7 +71,7 @@ class IdentidadUsuario:
             return {}
         atributos = {
             "user.id": self.user_id,
-            "auth.delegation": True,
+            "auth.delegation": False,
             "auth.source": ORIGEN_TOKEN_USUARIO,
         }
         if _capturar_pii_usuario():

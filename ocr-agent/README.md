@@ -470,8 +470,8 @@ contra las claves públicas de ThunderID** y publica en el span:
 | Atributo | Valor |
 |---|---|
 | `user.id` | el `sub` del token |
-| `auth.delegation` | `true` |
-| `auth.source` | `obo_token` |
+| `auth.delegation` | `false` hasta implementar OBO real |
+| `auth.source` | `user_token` |
 
 Por defecto **no** se exportan el username ni el email. Si necesitas verlos
 durante una depuración controlada, puedes activar explícitamente:
@@ -486,6 +486,12 @@ son PII y tienen cardinalidad alta. El valor por defecto es `false`.
 
 Con eso la traza responde *quién pidió el análisis*, no solo *qué agente lo
 ejecutó*.
+
+Esto es **atribución autenticada**, no OBO todavía: el BFF obtiene un token de
+usuario mediante `authorization_code` + PKCE y lo reenvía al agente. OBO exige
+un token exchange y consentimiento delegable: entonces `auth.delegation` pasará
+a `true` y `auth.source` a `obo_token`. No se debe etiquetar como delegación un
+token de usuario normal.
 
 La firma se comprueba de verdad. Un `user.id` sacado de un token sin verificar
 no vale nada: cualquiera podría mandar un JWT inventado y atribuirle un gasto a

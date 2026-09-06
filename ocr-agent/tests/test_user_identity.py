@@ -98,8 +98,8 @@ def test_token_valido_da_el_usuario():
 
     attrs = ident.atributos()
     assert attrs["user.id"] == USER_ID
-    assert attrs["auth.delegation"] is True
-    assert attrs["auth.source"] == "obo_token"
+    assert attrs["auth.delegation"] is False
+    assert attrs["auth.source"] == "user_token"
     # Por defecto, los datos de perfil no salen en la traza.
     volcado = json.dumps(attrs)
     assert "rafa@example.com" not in volcado
