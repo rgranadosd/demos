@@ -510,6 +510,56 @@ Variables:
 
 El JWKS se cachea una hora y se refresca solo si aparece un `kid` desconocido.
 
+#### Configuración de ThunderID para la demo
+
+La aplicación OAuth que protege el cliente local se llama `OCR Chat` y usa el
+client id `ocr-chat`. Es una aplicación confidencial: el BFF de `servidor.py`
+hace el intercambio de código y el navegador solo recibe una cookie de sesión
+opaca.
+
+| Ajuste | Valor |
+|---|---|
+| Grant types | `authorization_code`, `refresh_token` |
+| PKCE | obligatorio (`S256`) |
+| Redirect URI | `http://127.0.0.1:8800/callback` |
+| Scopes solicitados | `openid profile email` |
+| Access token claims | `username`, `given_name`, `family_name`, `email` |
+| ID token claims | `username`, `given_name`, `family_name`, `email` |
+| `profile` scope claims | `username`, `given_name`, `family_name` |
+| `email` scope claims | `email` |
+
+El usuario de demo es `rafa` (tipo `Person`). La Application no tiene
+`allowedUserTypes` restringido: cualquier usuario `Person` de esta instancia de
+ThunderID puede autenticarse. El agente solo exporta username y email si el
+componente define `OTEL_CAPTURE_USER_PII=true`.
+
+El branding de ThunderID tiene dos capas:
+
+- **Gate global:** `Telxius` y el favicon se configuran en `gate-config.js`.
+- **Application:** `OCR Chat.logoUrl` apunta a
+  `/gate/assets/images/logo.svg`, para que el bloque `Application logo` de la
+  pantalla de identificación no aparezca roto.
+
+[branding.yml](branding.yml) y
+[branding/assets/images/telxius-logo.svg](branding/assets/images/telxius-logo.svg)
+son la fuente versionada del logo. El SVG procede de Wikimedia Commons. El
+branding vivo se aplica al ConfigMap/deployment de ThunderID y a la Application
+por API; si el clúster se recrea, hay que reaplicarlo.
+
+#### Build desde repositorios públicos
+
+El template compartido `ClusterWorkflowTemplate/checkout-source` de AMP montaba
+un `git-secret` opcional vacío y salía con código `64` antes de clonar. Eso
+impedía construir este repositorio público aunque la rama y el commit fueran
+correctos. Se corrigió el template para que continúe con:
+
+```
+No git secret found, assuming public repository
+```
+
+No se añadió una credencial de GitHub ni se reutilizó la de otro proyecto. El
+componente debe seguir configurado con `repository.revision.branch: main`.
+
 ### Errores
 
 Todo fallo no recuperable deja las tres cosas a la vez — excepción registrada,
