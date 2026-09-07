@@ -246,6 +246,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         ruta, _, consulta = self.path.partition("?")
 
+        if ruta == "/branding/assets/images/ocr-app-logo-small.png":
+            with open(
+                os.path.join(AQUI, "branding", "assets", "images", "ocr-app-logo-small.png"),
+                "rb",
+            ) as fh:
+                return self._responder(200, fh.read(), "image/png")
+
         if ruta in ("/", "/index.html", "/chat.html"):
             if LOGIN_ACTIVO and not _sesion_de(self):
                 return self._redirigir("/login")

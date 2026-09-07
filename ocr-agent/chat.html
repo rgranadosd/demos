@@ -18,8 +18,8 @@
 
   header{display:flex;align-items:center;gap:14px;padding:14px 22px;
          border-bottom:1px solid var(--borde);background:var(--panel)}
-  .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--acento),#ff9f7a);
-        display:grid;place-items:center;font-size:18px;flex:none}
+  .logo{width:54px;height:38px;display:grid;place-items:center;flex:none}
+  .logo img{display:block;width:100%;height:100%;object-fit:contain}
   header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
   header .sub{font-size:11.5px;color:var(--suave);font-family:var(--mono);margin-top:2px;
               overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52vw}
@@ -166,7 +166,7 @@
 <body>
 
 <header>
-  <div class="logo">🧾</div>
+  <div class="logo"><img src="/branding/assets/images/ocr-app-logo-small.png" alt="OCR-App"></div>
   <div style="min-width:0">
     <h1>Agente OCR de gastos</h1>
     <div class="sub" id="destino">cargando…</div>
