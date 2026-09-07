@@ -246,12 +246,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         ruta, _, consulta = self.path.partition("?")
 
-        if ruta == "/branding/assets/images/ocr-app-logo-small.png":
+        assets = {
+            "/branding/assets/images/ocr-app-logo-small.png": (
+                "ocr-app-logo-small.png", "image/png"
+            ),
+            "/branding/assets/images/telxius-logo.svg": (
+                "telxius-logo.svg", "image/svg+xml"
+            ),
+        }
+        if ruta in assets:
+            nombre, tipo = assets[ruta]
             with open(
-                os.path.join(AQUI, "branding", "assets", "images", "ocr-app-logo-small.png"),
+                os.path.join(AQUI, "branding", "assets", "images", nombre),
                 "rb",
             ) as fh:
-                return self._responder(200, fh.read(), "image/png")
+                return self._responder(200, fh.read(), tipo)
 
         if ruta in ("/", "/index.html", "/chat.html"):
             if LOGIN_ACTIVO and not _sesion_de(self):
