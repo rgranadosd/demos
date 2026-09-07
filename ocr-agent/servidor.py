@@ -214,8 +214,9 @@ def reenviar(imagen: bytes, nombre: str, tipo: str, origen: str = "fichero",
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # menos ruido en pantalla durante la demo
-        if "/api/" in (args[0] if args else ""):
-            sys.stderr.write(f"  → {args[0]}\n")
+        mensaje = str(args[0]) if args else ""
+        if "/api/" in mensaje:
+            sys.stderr.write(f"  → {mensaje}\n")
 
     def _responder(self, codigo, cuerpo, tipo="application/json; charset=utf-8", cookie=None):
         datos = cuerpo if isinstance(cuerpo, bytes) else json.dumps(cuerpo).encode()
@@ -236,12 +237,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", destino)
         if cookie:
             self.send_header("Set-Cookie", cookie)
+        # No dejar que el navegador restaure el chat de su cache de historial
+        # mientras se redirige una sesión inexistente a ThunderID.
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _base(self):
         anfitrion = self.headers.get("Host") or f"127.0.0.1:{self.server.server_port}"
         return f"http://{anfitrion}"
+
+    def _iniciar_login(self):
+        if not LOGIN_ACTIVO:
+            return self._responder(503, {"error": "login no configurado"})
+        url, sid, sesion = _url_de_autorizacion(f"{self._base()}/callback")
+        _SESIONES[sid] = sesion
+        galleta = f"ocr_sesion={sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600"
+        return self._redirigir(url, galleta)
 
     def do_GET(self):
         ruta, _, consulta = self.path.partition("?")
@@ -264,17 +277,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if ruta in ("/", "/index.html", "/chat.html"):
             if LOGIN_ACTIVO and not _sesion_de(self):
-                return self._redirigir("/login")
+                return self._iniciar_login()
             with open(os.path.join(AQUI, "chat.html"), "rb") as fh:
                 return self._responder(200, fh.read(), "text/html; charset=utf-8")
 
         if ruta == "/login":
-            if not LOGIN_ACTIVO:
-                return self._responder(503, {"error": "login no configurado"})
-            url, sid, sesion = _url_de_autorizacion(f"{self._base()}/callback")
-            _SESIONES[sid] = sesion
-            galleta = f"ocr_sesion={sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600"
-            return self._redirigir(url, galleta)
+            return self._iniciar_login()
 
         if ruta == "/callback":
             parametros = urllib.parse.parse_qs(consulta)
