@@ -20,10 +20,14 @@
          border-bottom:1px solid var(--borde);background:var(--panel)}
   .logo{width:54px;height:38px;display:grid;place-items:center;flex:none}
   .logo img{display:block;width:100%;height:100%;object-fit:contain}
+    .empresa{width:82px;height:28px;margin-left:auto;padding:5px 8px;display:grid;
+             place-items:center;flex:none;background:#f6f9fc;border:1px solid #d8e0e8;
+             border-radius:6px}
+    .empresa img{display:block;width:100%;height:100%;object-fit:contain}
   header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
   header .sub{font-size:11.5px;color:var(--suave);font-family:var(--mono);margin-top:2px;
               overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52vw}
-  .chip{margin-left:auto;font-size:11px;padding:5px 11px;border-radius:999px;
+  .chip{font-size:11px;padding:5px 11px;border-radius:999px;
         border:1px solid var(--borde);color:var(--suave);white-space:nowrap;font-family:var(--mono)}
   .chip.on{color:var(--ok);border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.08)}
   .chip.off{color:var(--mal);border-color:rgba(248,81,73,.35);background:rgba(248,81,73,.08)}
@@ -171,6 +175,7 @@
     <h1>Agente OCR de gastos</h1>
     <div class="sub" id="destino">cargando…</div>
   </div>
+  <div class="empresa"><img src="/branding/assets/images/telxius-logo.svg" alt="Telxius"></div>
   <div class="chip" id="credencial">…</div>
   <a class="chip" id="sesion" href="/login" style="display:none;text-decoration:none"></a>
 </header>
@@ -228,6 +233,13 @@ fetch('/api/config').then(r => r.json()).then(c => {
 
   const sesion = $('#sesion');
   if (!c.login_activo) return;
+  // La sesión vive en memoria en el BFF. Si este se reinicia, el navegador
+  // conserva la cookie opaca pero la sesión ya no existe: no debe quedarse en
+  // la app con un aviso, sino volver a autenticarse.
+  if (!c.usuario) {
+    window.location.replace('/login');
+    return;
+  }
   sesion.style.display = '';
   if (c.usuario) {
     // El token no llega al navegador: solo el nombre para saber quien firma.
@@ -236,12 +248,6 @@ fetch('/api/config').then(r => r.json()).then(c => {
     sesion.className = 'chip sesion-accion';
     sesion.title = 'Cerrar la sesión de ' + c.usuario.nombre;
     sesion.setAttribute('aria-label', sesion.title);
-  } else {
-    sesion.textContent = 'Sesión requerida';
-    sesion.href = '/login';
-    sesion.className = 'chip off';
-    sesion.removeAttribute('title');
-    sesion.removeAttribute('aria-label');
   }
 }).catch(() => {});
 
