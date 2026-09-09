@@ -266,6 +266,12 @@ class Handler(BaseHTTPRequestHandler):
             "/branding/assets/images/telxius-logo.svg": (
                 "telxius-logo.svg", "image/svg+xml"
             ),
+            "/branding/assets/images/urbaser-logo.png": (
+                "urbaser-logo.png", "image/png"
+            ),
+            "/branding/assets/images/madrid-digital-logo.svg": (
+                "madrid-digital-logo.svg", "image/svg+xml"
+            ),
         }
         if ruta in assets:
             nombre, tipo = assets[ruta]

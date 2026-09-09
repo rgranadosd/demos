@@ -5,29 +5,29 @@
 # No se usan URLs remotas en el Gate en produccion: se descargan y versionan los
 # assets dentro de la imagen/configuracion de ThunderID.
 brand:
-  product_name: Telxius
+  product_name: Madrid Digital
   logo:
-    light: assets/images/telxius-logo.svg
-    dark: assets/images/telxius-logo.svg
-    source: https://upload.wikimedia.org/wikipedia/commons/5/58/Telxius_logo.svg
+    light: assets/images/madrid-digital-logo.svg
+    dark: assets/images/madrid-digital-logo.svg
+    source: https://upload.wikimedia.org/wikipedia/commons/0/00/Urbaser-logotipo.png
   favicon:
-    light: assets/images/telxius-logo.svg
-    dark: assets/images/telxius-logo.svg
-    source: https://upload.wikimedia.org/wikipedia/commons/5/58/Telxius_logo.svg
+    light: assets/images/madrid-digital-logo.svg
+    dark: assets/images/madrid-digital-logo.svg
+    source: https://upload.wikimedia.org/wikipedia/commons/0/00/Urbaser-logotipo.png
 
 # Salida esperada en gate-config.js de ThunderID.
 gate_config:
   brand:
-    product_name: Telxius
+    product_name: Madrid Digital
     favicon:
-      light: assets/images/telxius-logo.svg
-      dark: assets/images/telxius-logo.svg
+      light: assets/images/madrid-digital-logo.svg
+      dark: assets/images/madrid-digital-logo.svg
 
-# Logo exclusivo del cliente OAuth OCR Chat. El Gate global mantiene Telxius;
+# Logo exclusivo del cliente OAuth OCR Chat. El Gate global mantiene Urbaser;
 # este se muestra en el bloque "Application logo" de la pantalla de login.
 application:
   name: OCR Chat
   logo:
-    path: branding/assets/images/ocr-app-logo.png
-    login_asset: branding/assets/images/ocr-app-logo-small.png
-    gate_url: /gate/assets/images/ocr-app-logo-small.png
+    path: branding/assets/images/madrid-digital-logo.svg
+    login_asset: branding/assets/images/madrid-digital-logo.svg
+    gate_url: /gate/assets/images/madrid-digital-logo.svg

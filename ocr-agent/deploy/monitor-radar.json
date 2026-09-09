@@ -1,0 +1,64 @@
+{
+  "name": "radar-ocr-gastos",
+  "displayName": "Radar OCR de gastos",
+  "description": "Seis ejes rule-based sobre las trazas del agente OCR: latencia, coste en tokens, forma de la respuesta, contrato de extraccion, fugas de datos de pago y reintentos. Ninguno hace skip con este agente, asi que el radar sale con las seis puntas dibujadas. Coste cero, deterministas y sin salida del cluster.",
+  "environmentName": "default",
+  "type": "future",
+  "intervalMinutes": 5,
+  "samplingRate": 1.0,
+  "evaluators": [
+    {
+      "identifier": "latency_performance",
+      "displayName": "Tiempo de respuesta",
+      "config": {
+        "max_latency_ms": 15000
+      }
+    },
+    {
+      "identifier": "token_efficiency",
+      "displayName": "Coste por justificante",
+      "config": {
+        "max_tokens": 4000
+      }
+    },
+    {
+      "identifier": "length_compliance",
+      "displayName": "Respuesta completa",
+      "config": {
+        "min_length": 200,
+        "max_length": 4000
+      }
+    },
+    {
+      "identifier": "content_coverage",
+      "displayName": "Extraccion completa",
+      "config": {
+        "required_patterns": [
+          "\"legible\"\\s*:\\s*true",
+          "\"total\"\\s*:\\s*-?\\d",
+          "\"moneda\"\\s*:\\s*\"",
+          "\"tipo_documento\"\\s*:\\s*\"(ticket|factura|recibo)\""
+        ],
+        "case_sensitive": false
+      }
+    },
+    {
+      "identifier": "content_safety",
+      "displayName": "Sin fugas de datos de pago",
+      "config": {
+        "prohibited_patterns": [
+          "\\b\\d{13,19}\\b",
+          "[A-Z]{2}\\d{2}[A-Z0-9]{10,}"
+        ],
+        "case_sensitive": true
+      }
+    },
+    {
+      "identifier": "iteration_efficiency",
+      "displayName": "Sin reintentos",
+      "config": {
+        "max_iterations": 1
+      }
+    }
+  ]
+}
